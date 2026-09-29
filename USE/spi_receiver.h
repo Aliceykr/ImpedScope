@@ -10,41 +10,32 @@ extern "C" {
 #include "spi.h"
 
 /* ===========================================================================
- * Frame protocol
- * ---------------------------------------------------------------------------
- * One frame is transferred as a sequence of 32-bit words over SPI1.
- * Payload per frame:
- *   - start frame marker
- *   - frequency point / bin of the FFT result
- *   - FFT real/imaginary parts of Ui
- *   - FFT real/imaginary parts of Uo
- *   - stop frame marker
- * The exact word order and marker VALUES ARE NOT FINALIZED yet; adjust the
- * defines below once the master format is fixed.
+ * Frame protocol over 8-bit bytes (FPGA is the SPI master, spi_byte module).
+ * VALUES/LAYOUT ARE NOT FINALIZED - adjust the defines to match the FPGA.
+ *
+ *   [start marker][freq 4B][Ui re 4B][Ui im 4B][Uo re 4B][Uo im 4B][stop marker]
  * ===========================================================================*/
 
-/* Word indices inside one frame */
-#define FRAME_IDX_START        0u   /* start frame marker  */
-#define FRAME_IDX_FREQ         1u   /* corresponding frequency point / bin */
-#define FRAME_IDX_UI_RE        2u   /* FFT real part of Ui */
-#define FRAME_IDX_UI_IM        3u   /* FFT imaginary part of Ui */
-#define FRAME_IDX_UO_RE        4u   /* FFT real part of Uo */
-#define FRAME_IDX_UO_IM        5u   /* FFT imaginary part of Uo */
-#define FRAME_IDX_STOP         6u   /* stop frame marker */
-#define FRAME_WORDS            7u   /* total words per frame */
+/* Single-byte frame markers (PLACEHOLDERS - align with FPGA) */
+#define FRAME_START_MARKER      0xAAu
+#define FRAME_STOP_MARKER       0x55u
+#define FRAME_START_BYTES       1u
+#define FRAME_STOP_BYTES        1u
 
-/* Frame marker values (PLACEHOLDERS - to be aligned with the master) */
-#define FRAME_START_MARKER     0xFFFFFFFFu
-#define FRAME_STOP_MARKER      0xFFFFFFFEu
+/* Each value is a 32-bit word transferred as 4 bytes */
+#define FRAME_FIELD_BYTES       4u
+#define FRAME_FIELD_COUNT       5u    /* freq, Ui re, Ui im, Uo re, Uo im */
+#define FRAME_PAYLOAD_BYTES     (FRAME_FIELD_BYTES * FRAME_FIELD_COUNT)
+#define FRAME_TOTAL_BYTES       (FRAME_START_BYTES + FRAME_PAYLOAD_BYTES + FRAME_STOP_BYTES)
 
-/* Number of frames held in the circular DMA buffer (must be >= 2) */
-#define SPI_RX_FRAME_COUNT     2u
-#define SPI_RX_BUF_WORDS       (FRAME_WORDS * SPI_RX_FRAME_COUNT)
+/* Byte order of each 32-bit field:
+   1 = first received byte is MSB (big-endian), 0 = LSB first (little-endian) */
+#define FRAME_BIG_ENDIAN        1u
 
 /* Parsed FFT result of one frequency point */
 typedef struct
 {
-    uint32_t freq;     /* frequency point / bin */
+    uint32_t freq;     /* corresponding frequency point / bin */
     float    ui_re;    /* FFT real part of Ui */
     float    ui_im;    /* FFT imaginary part of Ui */
     float    uo_re;    /* FFT real part of Uo */
@@ -52,15 +43,12 @@ typedef struct
 } FFT_Point_t;
 
 /* Exported functions --------------------------------------------------------*/
-/* Starts SPI1 slave reception in DMA circular mode */
+/* Starts SPI1 slave 8-bit reception in DMA circular mode, one frame per round */
 void SPI_Receiver_Init(void);
 
-/* Returns the raw words of frame `index` (0 .. SPI_RX_FRAME_COUNT-1) */
-const uint32_t *SPI_Receiver_GetFrame(uint8_t index);
-
-/* Parses one raw frame into a FFT_Point_t.
+/* Parses one raw byte frame into a FFT_Point_t.
    Returns 1 if start/stop markers are valid, 0 otherwise. */
-uint8_t SPI_Receiver_ParseFrame(const uint32_t *raw, FFT_Point_t *out);
+uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out);
 
 #ifdef __cplusplus
 }
