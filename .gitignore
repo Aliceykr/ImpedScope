@@ -1,0 +1,28 @@
+# Keil MDK-ARM build artifacts
+MDK-ARM/9_30/
+MDK-ARM/DebugConfig/
+MDK-ARM/RTE/
+MDK-ARM/*.log
+MDK-ARM/*.lst
+MDK-ARM/*.bak
+MDK-ARM/*.uvguix.*
+
+# Compiler/linker intermediate files
+*.o
+*.d
+*.crf
+*.iex
+*.axf
+*.hex
+*.bin
+*.dep
+*.lnp
+*.htm
+*.map
+*.lst
+*.sct
+*.scvd
+*.build_log.htm
+
+# Debugger logs
+JLinkLog.txt

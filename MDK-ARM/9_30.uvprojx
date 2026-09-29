@@ -332,7 +332,7 @@
               <MiscControls />
               <Define>USE_PWR_LDO_SUPPLY,USE_HAL_DRIVER,STM32H750xx</Define>
               <Undefine />
-              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include</IncludePath>
+              <IncludePath>../USE;../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -415,6 +415,16 @@
               <FileName>stm32h7xx_hal_msp.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32h7xx_hal_msp.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Application/User/USE</GroupName>
+          <Files>
+            <File>
+              <FileName>spi_receiver.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../USE/spi_receiver.c</FilePath>
             </File>
           </Files>
         </Group>
