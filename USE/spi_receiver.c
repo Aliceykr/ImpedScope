@@ -1,97 +1,83 @@
 #include "spi_receiver.h"
+
 #include <string.h>
 
-/* Private variables ---------------------------------------------------------*/
-/* DMA 接收缓冲区：大小为一整帧。
-   DMA 配置为循环模式，收满一帧后会自动从头开始，并触发一次接收完成回调，
-   因此无需在回调里手动重启接收。 */
-static uint8_t s_spiRxBuf[FRAME_TOTAL_BYTES];
+/* DMA 缓冲区只保存一帧，DMA 配置为循环模式。 */
+static uint8_t s_spi_receive_buffer[SPI_FRAME_TOTAL_BYTES];
 
-/* Private function prototypes -----------------------------------------------*/
-/* 把连续 4 个字节按约定字节序拼装成一个 32-bit 无符号整数 */
-static uint32_t Receiver_AssembleWord(const uint8_t *p);
+/* 将协议中的 4 个字节还原为一个 32 位字。 */
+static uint32_t SPI_Receiver_AssembleWord(const uint8_t *bytes);
 
-/* Exported functions --------------------------------------------------------*/
 void SPI_Receiver_Init(void)
 {
-    /* 启动 SPI1 的 DMA 接收：外设 -> 内存，长度为一整帧；
-       返回值在此忽略（正常情况下 SPI 与 DMA 已在 main 中完成初始化）。 */
-    (void)HAL_SPI_Receive_DMA(&hspi1, s_spiRxBuf, FRAME_TOTAL_BYTES);
+    /* SPI 和 DMA 已由 CubeMX 初始化，这里只启动接收。 */
+    (void)HAL_SPI_Receive_DMA(&hspi1,
+                              s_spi_receive_buffer,
+                              SPI_FRAME_TOTAL_BYTES);
 }
 
 uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out)
 {
-    const uint8_t *p;   /* 指向有效载荷起始位置 */
-    uint32_t value;     /* 临时保存拼装出的 32-bit 原始数据 */
+    const uint8_t *payload;
+    uint32_t raw_value;
 
-    /* 入参合法性检查 */
     if ((raw == (const uint8_t *)0) || (out == (FFT_Point_t *)0))
     {
         return 0u;
     }
 
-    /* 校验帧头标记 */
-    if (raw[0] != FRAME_START_MARKER)
+    if (raw[0u] != SPI_FRAME_START_MARKER ||
+        raw[SPI_FRAME_TOTAL_BYTES - 1u] != SPI_FRAME_END_MARKER)
     {
         return 0u;
     }
 
-    /* 校验帧尾标记（位于整帧最后一个字节）*/
-    if (raw[FRAME_TOTAL_BYTES - 1u] != FRAME_STOP_MARKER)
-    {
-        return 0u;
-    }
+    payload = &raw[SPI_FRAME_MARKER_BYTES];
+    out->freq = SPI_Receiver_AssembleWord(&payload[0u]);
 
-    /* p 指向帧头之后的有效载荷首字节 */
-    p = &raw[FRAME_START_BYTES];
+    /* 按原始位模式复制浮点数，避免未对齐访问和严格别名问题。 */
+    raw_value = SPI_Receiver_AssembleWord(&payload[4u]);
+    (void)memcpy(&out->ui_re, &raw_value, sizeof(out->ui_re));
 
-    /* 第 1 个字段：频点（按 uint32 使用）*/
-    out->freq = Receiver_AssembleWord(&p[0u]);
+    raw_value = SPI_Receiver_AssembleWord(&payload[8u]);
+    (void)memcpy(&out->ui_im, &raw_value, sizeof(out->ui_im));
 
-    /* 第 2~5 个字段：4 个 float（Ui/Uo 的实部、虚部）。
-       先拼装成 32-bit 原始位模式，再用 memcpy 原样重解释为 float，
-       这样避免了通过指针强转带来的“严格别名/对齐”问题。 */
-    value = Receiver_AssembleWord(&p[4u]);
-    (void)memcpy(&out->ui_re, &value, sizeof(float));
-    value = Receiver_AssembleWord(&p[8u]);
-    (void)memcpy(&out->ui_im, &value, sizeof(float));
-    value = Receiver_AssembleWord(&p[12u]);
-    (void)memcpy(&out->uo_re, &value, sizeof(float));
-    value = Receiver_AssembleWord(&p[16u]);
-    (void)memcpy(&out->uo_im, &value, sizeof(float));
+    raw_value = SPI_Receiver_AssembleWord(&payload[12u]);
+    (void)memcpy(&out->uo_re, &raw_value, sizeof(out->uo_re));
+
+    raw_value = SPI_Receiver_AssembleWord(&payload[16u]);
+    (void)memcpy(&out->uo_im, &raw_value, sizeof(out->uo_im));
 
     return 1u;
 }
 
-/* Private functions ---------------------------------------------------------*/
-static uint32_t Receiver_AssembleWord(const uint8_t *p)
+static uint32_t SPI_Receiver_AssembleWord(const uint8_t *bytes)
 {
-#if FRAME_BIG_ENDIAN
-    /* 大端：p[0] 为最高字节，p[3] 为最低字节 */
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+#if SPI_FRAME_BIG_ENDIAN
+    return ((uint32_t)bytes[0u] << 24) |
+           ((uint32_t)bytes[1u] << 16) |
+           ((uint32_t)bytes[2u] << 8)  |
+           ((uint32_t)bytes[3u]);
 #else
-    /* 小端：p[0] 为最低字节，p[3] 为最高字节 */
-    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[1] << 8)  |  (uint32_t)p[0];
+    return ((uint32_t)bytes[3u] << 24) |
+           ((uint32_t)bytes[2u] << 16) |
+           ((uint32_t)bytes[1u] << 8)  |
+           ((uint32_t)bytes[0u]);
 #endif
 }
 
-/* HAL callbacks -------------------------------------------------------------*/
-/* SPI 接收完成回调：DMA 收满一帧（22 字节）时由 HAL 在中断上下文调用。 */
+/* DMA 收满一帧后由 HAL 在中断上下文调用。当前只完成校验和解析。 */
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    /* 只处理 SPI1 的事件（工程中若有多个 SPI，以此区分）*/
-    if (hspi->Instance == SPI1)
-    {
-        FFT_Point_t point;
+    FFT_Point_t point;
 
-        /* 解析本帧；校验通过后 point 中即为该频点的数据 */
-        if (SPI_Receiver_ParseFrame(s_spiRxBuf, &point) != 0u)
-        {
-            /* 有效帧：在此处使用 point（频点 / Ui / Uo）。
-               例如调用 CircuitID_Compute() 计算频响。
-               注意：本函数运行在中断上下文，应保持简短，避免耗时操作。 */
-        }
+    if ((hspi == (SPI_HandleTypeDef *)0) || hspi->Instance != SPI1)
+    {
+        return;
+    }
+
+    if (SPI_Receiver_ParseFrame(s_spi_receive_buffer, &point) != 0u)
+    {
+        /* 保持中断处理简短，需要计算时由上层任务读取 point。 */
     }
 }

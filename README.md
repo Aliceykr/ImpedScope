@@ -1,92 +1,123 @@
-# 9_30 工程说明
+# 9_30：STM32 黑盒电路频响辨识
 
-基于 **STM32H750XBH6** 的黑盒电路频响辨识工程。FPGA 作为 SPI 主机，将各频点的
-Ui / Uo 的 FFT 结果按字节发给 STM32；STM32 在片上计算被测电路（DUT）的
-**频率、阻抗幅度、阻抗相位**（XYZ）。
+## 1. 工程用途
 
-- 开发环境：Keil MDK-ARM（ARMCC V5）、STM32CubeMX 6.18、HAL FW V1.13
-- 主控：STM32H750XBHx，SYSCLK 480 MHz，HCLK 120 MHz，APB 60 MHz
+本工程运行在 **STM32H750XBH6** 上，用于接收 FPGA 发送的频域采样结果，并计算被测电路（DUT）的频率响应、阻抗和导纳。
 
-## 目录结构
+FPGA 对输入电压 `Ui` 和输出电压 `Uo` 做 FFT，将每个频点的复数结果通过 SPI1 发给 STM32。STM32 完成帧校验、数据解析和频响计算。
 
-```
+当前工程已经实现：
+
+- SPI1 从机 8 位接收
+- DMA 循环接收固定长度数据帧
+- 帧头、帧尾校验
+- IEEE-754 单精度浮点数据解析
+- 传递函数 `H = Uo / Ui` 计算
+- 跨阻 I/V 前端下的阻抗 `Z = -R / H` 和导纳 `Y = -H / R` 计算
+- 输入或输出幅值过小时的结果有效性判断
+
+当前 `main()` 没有对计算结果增加串口、网络或存储输出。SPI 回调只负责接收和解析，后续可在上层任务中读取解析结果并调用 `CircuitID_Compute()`。
+
+## 2. 工程结构
+
+```text
 9_30/
-├─ USE/                     用户逻辑（CubeMX 不认识、不触碰，重生成不丢）
-│  ├─ spi_receiver.h/.c     SPI 从机字节帧接收 + DMA + 帧解析
-│  └─ circuit_id.h/.c       频响辨识：H、阻抗 Z、导纳 Y
-├─ Core/                    CubeMX 生成
-│  ├─ Src/main.c            仅在 USER CODE 区加入初始化调用
-│  └─ Src/spi.c             SPI1 / DMA 配置（已改为 8-bit）
-├─ Drivers/                 HAL 与 CMSIS
-├─ MDK-ARM/                 Keil 工程（9_30.uvprojx）
-└─ 9_30.ioc                 CubeMX 工程文件
+├─ USE/
+│  ├─ spi_receiver.h/.c   SPI1 帧接收、DMA 启动和数据解析
+│  └─ circuit_id.h/.c     频响、阻抗和导纳计算
+├─ Core/
+│  ├─ Src/main.c          系统初始化和主循环
+│  └─ Src/spi.c           SPI1 与 DMA 配置
+├─ Drivers/               STM32 HAL 和 CMSIS
+├─ MDK-ARM/               Keil 工程文件
+└─ 9_30.ioc               STM32CubeMX 配置文件
 ```
 
-## 硬件连接（前端：跨阻 I/V，虚地法）
+`USE/` 保存用户逻辑，CubeMX 重新生成代码时应保留该目录，并确保 Keil 工程包含两个 `.c` 文件且添加 `../USE` 头文件路径。
 
-```
-信号源 ──Ui──┬── DUT（导纳 Y）
-             │      │ 电流 I
-             │      ▼
-             │  运放(−)反相端，反馈电阻 R 接输出
-             │  运放(+)同相端接地
-             └───────────── Uo（运放输出）
-```
+## 3. 硬件模型
 
-运放反相端虚地，DUT 两端电压即 Ui；白板公式：
+前端使用跨阻放大器，运放反相端近似虚地，反馈电阻为 `R`：
 
-```
-I  = Ui·Y
-Uo = −I·R
-H  = Uo/Ui = −Y·R
-Y  = −H/R
-Z  = −R/H
+```text
+信号源 ── Ui ── DUT ── 虚地
+                  │
+                  └── 运放跨阻放大器 ── Uo
 ```
 
-## SPI 帧协议（8-bit，每帧 22 字节）
+对应关系为：
 
+```text
+I = Ui × Y
+Uo = -I × R
+H = Uo / Ui = -Y × R
+Y = -H / R
+Z = -R / H
 ```
-[起始 0xAA][频点 4B][Ui实 4B][Ui虚 4B][Uo实 4B][Uo虚 4B][结束 0x55]
+
+## 4. SPI 帧协议
+
+每帧共 22 字节，字段按大端顺序发送：
+
+```text
+[0xAA]
+[频点 4 字节]
+[Ui 实部 4 字节]
+[Ui 虚部 4 字节]
+[Uo 实部 4 字节]
+[Uo 虚部 4 字节]
+[0x55]
 ```
 
-- FPGA 为主机（spi_byte 模块），STM32 SPI1 为从机，模式 0（CPOL0/CPHA0）
-- DMA1_Stream0 / SPI1_RX，循环模式，收满一帧触发 `HAL_SPI_RxCpltCallback`
-- 当前字节序为大端（MSB first），数据按 IEEE-754 float 解析
+SPI 配置如下：
 
-> 标记值、字节序、字段顺序、频点含义（频率值或 bin 号）目前均为占位，
-> 最终以 FPGA 实际协议为准，只需修改 `spi_receiver.h` / `circuit_id.h` 中的宏。
+- FPGA：主机
+- STM32：SPI1 从机
+- 模式：Mode 0，CPOL=0，CPHA=0
+- 数据宽度：8 bit
+- 首位顺序：MSB first
+- DMA：`DMA1_Stream0`，SPI1 RX，循环模式
 
-## 计算流程
+协议相关宏集中在 [USE/spi_receiver.h](USE/spi_receiver.h) 中。若 FPGA 的标记值、字节序或字段定义发生变化，只需修改该文件中的宏和解析顺序。
 
-1. DMA 收满一帧 → 校验帧头帧尾 → 解析为 `FFT_Point_t`
-2. `CircuitID_Compute()` 计算：
-   - H = Uo·Ui\* / |Ui|²（H1 估计，复数除法）
-   - 阻抗 Z = −R/H：幅度 Ω（含 dB）、相位 °
-   - 导纳 Y = −H/R
-3. 噪声门限：|Ui| 过小或 |Uo| 过小（开路）的频点标记 `valid=0` 剔除
+## 5. 频响计算
 
-XYZ 输出：**X = 频率(Hz)，Y = |Z|(Ω)，Z = arg(Z)(°)**。
-
-## 调用方式
+`CircuitID_Compute()` 的输入是一个 `FFT_Point_t`，输出是一个 `FRF_Point_t`：
 
 ```c
-FFT_Point_t fft;   /* 由 SPI 接收解析得到 */
-FRF_Point_t frf;
-if (CircuitID_Compute(&fft, &frf)) {
-    /* frf.frequency_hz / frf.z_mag_ohm / frf.z_phase_deg */
+FFT_Point_t input;
+FRF_Point_t output;
+
+if (CircuitID_Compute(&input, &output) != 0u) {
+    /* output.frequency_hz、output.z_mag_ohm、output.z_phase_deg */
 }
 ```
 
-## 与 CubeMX 解耦 / 重新生成注意事项
+默认输出可用于 XYZ 数据：
 
-- 全部用户逻辑放在 `USE/`，CubeMX 不会修改
-- `main.c` 仅在 `USER CODE` 区内有 `#include "spi_receiver.h"` 与
-  `SPI_Receiver_Init()`，重生成会保留
-- `spi.c` 与 `.ioc` 已同步为 8-bit，重生成不退回
-- 若重生成后 Keil 工程丢失 USE 编译组或头文件路径，手动恢复：
-  - 将 `USE/spi_receiver.c`、`USE/circuit_id.c` 加入工程
-  - Include Paths 增加 `../USE`
+- `X = frequency_hz`：频率，Hz
+- `Y = z_mag_ohm`：阻抗幅值，Ω
+- `Z = z_phase_deg`：阻抗相位，°
 
-## 构建
+主要计算参数位于 [USE/circuit_id.h](USE/circuit_id.h)：
 
-Keil 中打开 `MDK-ARM/9_30.uvprojx` 编译，当前为 0 Error / 0 Warning。
+- `CIR_FREQ_IS_RAW`：频点字段是实际频率还是 FFT bin
+- `CIR_FREQ_UNIT`：实际频率单位
+- `CIR_FEEDBACK_RESISTOR_OHM`：反馈电阻值
+- `CIR_INPUT_MIN_MAG`、`CIR_OUTPUT_MIN_MAG`：有效性门限
+
+## 6. 编译与维护
+
+使用 Keil MDK-ARM 打开 `MDK-ARM/9_30.uvprojx` 编译。工程基于：
+
+- STM32CubeMX 6.18
+- STM32H7 HAL FW 1.13
+- ARMCC V5
+- 系统时钟 480 MHz，HCLK 120 MHz，APB 60 MHz
+
+重新生成 CubeMX 代码后，请检查：
+
+1. `USE/spi_receiver.c` 和 `USE/circuit_id.c` 仍在 Keil 工程中。
+2. 工程头文件路径仍包含 `../USE`。
+3. SPI1 数据宽度仍为 8 bit，DMA 仍为循环接收。
+4. `main.c` 的用户代码区仍调用 `SPI_Receiver_Init()`。
