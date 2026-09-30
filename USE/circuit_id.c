@@ -17,7 +17,7 @@ void CircuitID_Init(void)
 uint8_t CircuitID_Compute(const FFT_Point_t *in, FRF_Point_t *out)
 {
     float ui_re, ui_im, uo_re, uo_im;
-    float ui_mag2, h_re, h_im, h_mag;
+    float ui_mag2, h_re, h_im, h_mag2, h_mag;
 
     if ((in == (const FFT_Point_t *)0) || (out == (FRF_Point_t *)0))
     {
@@ -31,7 +31,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *in, FRF_Point_t *out)
 
     ui_mag2 = (ui_re * ui_re) + (ui_im * ui_im);
 
-    /* Noise gate */
+    /* Reference noise gate */
     if (ui_mag2 <= (CIR_UI_MIN_MAG * CIR_UI_MIN_MAG))
     {
         out->valid = 0u;
@@ -42,20 +42,44 @@ uint8_t CircuitID_Compute(const FFT_Point_t *in, FRF_Point_t *out)
     h_re = ((uo_re * ui_re) + (uo_im * ui_im)) / ui_mag2;
     h_im = ((uo_im * ui_re) - (uo_re * ui_im)) / ui_mag2;
 
-    h_mag = sqrtf((h_re * h_re) + (h_im * h_im));
+    h_mag2 = (h_re * h_re) + (h_im * h_im);
+    h_mag  = sqrtf(h_mag2);
 
-    out->frequency_hz = CircuitID_FreqToHz(in->freq);
-    out->magnitude_dB = 20.0f * log10f(h_mag + CIR_DEN_GUARD);
-    out->phase_deg    = atan2f(h_im, h_re) * 180.0f / CIR_PIF;
-    out->valid        = 1u;
+    out->frequency_hz   = CircuitID_FreqToHz(in->freq);
+    out->h_magnitude_dB = 20.0f * log10f(h_mag + CIR_DEN_GUARD);
+    out->h_phase_deg    = atan2f(h_im, h_re) * 180.0f / CIR_PIF;
 
-#if CIR_DUT_TOPOLOGY != 0u
-    /* Impedance path (placeholder; refine once the DUT topology is fixed):
-       topology 1: Z_DUT = R_ref * (1/H - 1)
-       topology 2: Z_DUT = R_ref / H
-       Compute from h_re/h_im when needed. */
+#if CIR_DUT_TOPOLOGY == 1u
+    /* Response noise gate: Uo ~ 0 means Z -> infinity (open circuit) */
+    if (h_mag2 <= (CIR_UO_MIN_MAG * CIR_UO_MIN_MAG))
+    {
+        out->valid = 0u;
+        return 0u;
+    }
+
+    /* Z = -R/H = -R * conj(H)/|H|^2 */
+    {
+        float z_re = -(CIR_R_FB_OHM * h_re) / h_mag2;
+        float z_im = -(CIR_R_FB_OHM * h_im) / h_mag2;
+        float z_mag = CIR_R_FB_OHM / h_mag;
+
+        out->z_mag_ohm   = z_mag;
+        out->z_mag_dB    = 20.0f * log10f(z_mag + CIR_DEN_GUARD);
+        out->z_phase_deg = atan2f(z_im, z_re) * 180.0f / CIR_PIF;
+    }
+
+    /* Y = -H/R */
+    {
+        float y_re = -h_re / CIR_R_FB_OHM;
+        float y_im = -h_im / CIR_R_FB_OHM;
+        float y_mag = h_mag / CIR_R_FB_OHM;
+
+        out->y_mag_siemens = y_mag;
+        out->y_phase_deg   = atan2f(y_im, y_re) * 180.0f / CIR_PIF;
+    }
 #endif
 
+    out->valid = 1u;
     return 1u;
 }
 

@@ -11,9 +11,17 @@ extern "C" {
 
 /* ===========================================================================
  * Black-box circuit frequency-response identification (runs on MCU).
- * Computes, per frequency point:
- *   H(f) = Uo(f) / Ui(f)   (complex, H1 estimate)
- *   X = frequency (Hz), Y = magnitude (dB), Z = phase (deg)
+ *
+ * Front end (per whiteboard): transimpedance (I/V) amplifier, virtual ground.
+ *   DUT admittance Y, feedback resistor R:
+ *     I  = Ui * Y
+ *     Uo = -I * R
+ *     H  = Uo/Ui = -Y*R
+ *     Y  = -H/R
+ *     Z  = 1/Y = -R/H
+ *
+ * XYZ output (DUT impedance):
+ *   X = frequency (Hz), Y = |Z| (ohm), Z = arg(Z) (deg)
  * ===========================================================================*/
 
 /* ---- Frequency field: bin -> Hz ---- */
@@ -25,14 +33,15 @@ extern "C" {
 #define CIR_SAMPLE_RATE_HZ      1000000.0f
 #define CIR_FFT_POINTS          1024u
 
-/* ---- DUT topology / reference resistor (PLACEHOLDER, not used in ratio
- * mode; kept so impedance can be added later) ----
- * 0 = transfer ratio Uo/Ui only (no impedance)
- * 1 = DUT in series with R_ref; Ui = total voltage, Uo = voltage on R_ref
- * 2 = DUT in series with R_ref; Ui = voltage on DUT, Uo = voltage on R_ref
+/* ---- Front-end topology ----
+ * 0 = transfer ratio only (H = Uo/Ui), no impedance conversion
+ * 1 = transimpedance I/V amplifier, virtual ground (whiteboard):
+ *       Y = -H/R,  Z = -R/H
  */
-#define CIR_DUT_TOPOLOGY        0u
-#define CIR_R_REF_OHM           1000.0f
+#define CIR_DUT_TOPOLOGY        1u
+
+/* Feedback / reference resistor R of the I/V amplifier, in ohms */
+#define CIR_R_FB_OHM            1000.0f
 
 /* ---- Excitation ----
  * 0 = swept sine (single tone; one frame per point, no averaging)
@@ -41,16 +50,31 @@ extern "C" {
 #define CIR_EXCITATION          0u
 #define CIR_AVG_FRAMES          1u
 
-/* Noise gate: points whose |Ui| is below this are rejected as unreliable */
-#define CIR_UI_MIN_MAG          1e-4f
+/* Noise gates: reject points whose reference/response magnitude is too small */
+#define CIR_UI_MIN_MAG          1e-4f   /* |Ui| gate (H unreliable)        */
+#define CIR_UO_MIN_MAG          1e-6f   /* |Uo| gate (Z -> open circuit)  */
 
-/* Frequency-response result (XYZ) */
+/* Frequency-response result */
 typedef struct
 {
-    float frequency_hz;   /* X: frequency */
-    float magnitude_dB;   /* Y: |H| in dB   */
-    float phase_deg;      /* Z: phase of H  */
-    uint8_t valid;        /* 1 = reliable, 0 = rejected */
+    float frequency_hz;   /* X: frequency                       */
+
+    /* Transfer function H = Uo/Ui */
+    float h_magnitude_dB;  /* |H| in dB                          */
+    float h_phase_deg;     /* arg(H), degrees                    */
+
+#if CIR_DUT_TOPOLOGY == 1u
+    /* DUT impedance Z = -R/H */
+    float z_mag_ohm;       /* Y: |Z|, ohms                       */
+    float z_mag_dB;        /* |Z| in dB (20log10)                */
+    float z_phase_deg;     /* Z: arg(Z), degrees                 */
+
+    /* DUT admittance Y = -H/R */
+    float y_mag_siemens;   /* |Y|, siemens                       */
+    float y_phase_deg;     /* arg(Y), degrees                    */
+#endif
+
+    uint8_t valid;         /* 1 = reliable, 0 = rejected         */
 } FRF_Point_t;
 
 /* Exported functions --------------------------------------------------------*/
