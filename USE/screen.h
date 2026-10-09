@@ -13,7 +13,7 @@ extern "C" {
 #define SCREEN_REFRESH_PERIOD_MS     500u
 
 /*
- * 错误码，与 PLAN_debug_screen.md 6.1 节对应。0 保留表示"无错误"。
+ * 错误码，说明见 README.md 第 8.2 节。0 保留表示"无错误"。
  *
  * E01 是默认致命码：CubeMX 生成的 MX_*_Init() 内部直接调用
  * Error_Handler()，无法区分具体外设，统一显示 E01 HAL_INIT。
