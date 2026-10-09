@@ -27,6 +27,8 @@ extern "C" {
 #define SPI_FRAME_TOTAL_BYTES        (SPI_FRAME_MARKER_BYTES + \
                                       SPI_FRAME_PAYLOAD_BYTES + \
                                       SPI_FRAME_MARKER_BYTES)
+#define SPI_DMA_BUFFER_BYTES         (SPI_FRAME_TOTAL_BYTES * 2u)
+#define SPI_POINT_QUEUE_SIZE         4u
 
 /* 1：大端（先接收最高字节）；0：小端（先接收最低字节）。 */
 #define SPI_FRAME_BIG_ENDIAN         1u
@@ -41,11 +43,14 @@ typedef struct
     float    uo_im;
 } FFT_Point_t;
 
-/* 启动 SPI1 从机 DMA 循环接收。 */
-void SPI_Receiver_Init(void);
+/* 启动 SPI1 从机 DMA 循环接收；成功返回 1，失败返回 0。 */
+uint8_t SPI_Receiver_Init(void);
 
 /* 校验并解析一帧原始数据；成功返回 1，失败返回 0。 */
 uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out);
+
+/* 从接收队列取出一个完整频点；队列为空时返回 0。 */
+uint8_t SPI_Receiver_TryGetPoint(FFT_Point_t *out);
 
 #ifdef __cplusplus
 }

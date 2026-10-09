@@ -20,11 +20,14 @@
 #include "main.h"
 #include "dma.h"
 #include "spi.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "spi_receiver.h"
+#include "circuit_id.h"
+#include "screen.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,14 +101,32 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
-  SPI_Receiver_Init();
+  CircuitID_Init();
+  Screen_Init();
+  if (SPI_Receiver_Init() == 0u)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    FFT_Point_t fft_point;
+    FRF_Point_t frf_point;
+
+    while (SPI_Receiver_TryGetPoint(&fft_point) != 0u)
+    {
+      if (CircuitID_Compute(&fft_point, &frf_point) != 0u)
+      {
+        Screen_SetResult(&frf_point);
+      }
+    }
+
+    Screen_Poll();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
