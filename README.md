@@ -17,7 +17,17 @@ FPGA 对输入电压 `Ui` 和输出电压 `Uo` 做 FFT，将每个频点的复�
 - 跨阻 I/V 前端下的阻抗 `Z = -R / H` 和导纳 `Y = -H / R` 计算
 - 输入或输出幅值过小时的结果有效性判断
 
-主循环从接收队列取出频点并调用 `CircuitID_Compute()`，有效结果交给 `Screen_SetResult()` 保存。UART4（9600 8N1）每 0.5 s 通过 `Screen_Poll()` 向串口屏发送最近一个有效频点的三个参数：`t_freq.txt`（频率，Hz）、`t_zmag.txt`（阻抗幅值 |Z|，Ω）、`t_zph.txt`（阻抗相位，°），每条指令以 `FF FF FF` 结尾。串口屏页面中需要建立同名文本框控件。
+主循环从接收队列取出频点并调用 `CircuitID_Compute()`，有效结果交给 `Screen_SetResult()` 保存。UART4（9600 8N1）每 0.5 s 通过 `Screen_Poll()` 向串口屏一次发送 5 条指令（缓冲区 256 字节，每条以 `FF FF FF` 结尾）：
+
+| 控件 | 内容 | 示例 |
+|---|---|---|
+| `t0` | 频率（Hz） | `freq:1000` / 无结果时 `freq:-` |
+| `t1` | 阻抗幅值 \|Z\|（Ω） | `zmag:1234.56` / 无结果时 `zmag:-` |
+| `t2` | 阻抗相位（°） | `zph:-12.34` / 无结果时 `zph:-` |
+| `t3` | 心跳计数 | `beat:1234`，每刷新周期 +1 |
+| `t4` | 运行阶段或最近一次错误 | `stage:LOOP`、`stage:E03 SPI_FRAME x12` |
+
+上电阶段依次为 `BOOT → CLK → PERIPH → MODULE → SPI → LOOP`，由 `Screen_SetStage()` 在 `main.c` 的 USER CODE 区打点；其中 BOOT、CLK 发生在 UART 初始化前仅存内存，PERIPH 起屏幕可见（设置时立即阻塞发送并保持约 150 ms）。非致命错误通过 `Screen_ReportError(code)` 在中断/主循环中计数，`t4` 显示最近一次事件及累计次数（16 位回绕）；致命错误在 `Error_Handler()` 中关中断后阻塞发送 `t4` 并锁定显示。错误码 E01~E16 见 `USE/screen.h`（时钟配置失败发生在 UART 就绪前，屏幕不可见，未纳入码表，只能用调试器定位）。串口屏页面需建立同名 `t0`~`t4` 文本框控件。
 
 ## 2. 工程结构
 

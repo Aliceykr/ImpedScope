@@ -72,7 +72,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  Screen_SetStage("BOOT");
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -94,7 +94,7 @@ int main(void)
   PeriphCommonClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  Screen_SetStage("CLK");
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -103,16 +103,20 @@ int main(void)
   MX_SPI1_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
-  CircuitID_Init();
   Screen_Init();
+  Screen_SetStage("PERIPH");
+  CircuitID_Init();
+  Screen_SetStage("MODULE");
   if (SPI_Receiver_Init() == 0u)
   {
-    Error_Handler();
+    Screen_Fatal(SCREEN_E02_SPI_DMA);
   }
+  Screen_SetStage("SPI");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  Screen_SetStage("LOOP");
   while (1)
   {
     FFT_Point_t fft_point;
@@ -254,6 +258,7 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  Screen_FatalReportBlocking();
   while (1)
   {
   }

@@ -4,6 +4,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "screen.h"
+
 #define CIR_PI              3.14159265358979323846f
 #define CIR_LOG_GUARD       1e-20f
 
@@ -39,6 +41,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     if ((CIR_FEEDBACK_RESISTOR_OHM <= 0.0f) ||
         (input->freq == 0u))
     {
+        Screen_ReportError(SCREEN_E07_CIR_CFG);
         return 0u;
     }
 
@@ -50,6 +53,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     if (!CircuitID_IsFinite(ui_re) || !CircuitID_IsFinite(ui_im) ||
         !CircuitID_IsFinite(uo_re) || !CircuitID_IsFinite(uo_im))
     {
+        Screen_ReportError(SCREEN_E08_CIR_NAN_IN);
         return 0u;
     }
 
@@ -57,6 +61,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     if (!CircuitID_IsFinite(ui_magnitude_squared) ||
         ui_magnitude_squared <= (CIR_INPUT_MIN_MAG * CIR_INPUT_MIN_MAG))
     {
+        Screen_ReportError(SCREEN_E09_CIR_UI_LOW);
         return 0u;
     }
 
@@ -64,6 +69,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     if (!CircuitID_IsFinite(uo_magnitude_squared) ||
         uo_magnitude_squared <= (CIR_OUTPUT_MIN_MAG * CIR_OUTPUT_MIN_MAG))
     {
+        Screen_ReportError(SCREEN_E10_CIR_UO_LOW);
         return 0u;
     }
 
@@ -77,6 +83,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     if (!CircuitID_IsFinite(h_re) || !CircuitID_IsFinite(h_im) ||
         !CircuitID_IsFinite(h_magnitude_squared))
     {
+        Screen_ReportError(SCREEN_E11_CIR_H_NAN);
         return 0u;
     }
 
@@ -90,14 +97,16 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         !CircuitID_IsFinite(output->h_magnitude_dB) ||
         !CircuitID_IsFinite(output->h_phase_deg))
     {
+        Screen_ReportError(SCREEN_E12_CIR_OUT_NAN);
         (void)memset(output, 0, sizeof(*output));
         return 0u;
     }
 
 #if CIR_DUT_TOPOLOGY == 1u
     /* H 过小表示阻抗趋于无穷，结果不可靠。 */
-    if (h_magnitude_squared <= (CIR_OUTPUT_MIN_MAG * CIR_OUTPUT_MIN_MAG))
+    if (h_magnitude_squared <= (CIR_H_MIN_MAG * CIR_H_MIN_MAG))
     {
+        Screen_ReportError(SCREEN_E13_CIR_H_LOW);
         (void)memset(output, 0, sizeof(*output));
         return 0u;
     }
@@ -107,10 +116,11 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         float z_im;
         float z_magnitude;
 
-        /* Z = -R / H = -R * conj(H) / |H|^2。 */
+        /* Z = -R / H = -R * conj(H) / |H|^2
+         *     = (-R*h_re + j*R*h_im) / |H|^2。 */
         z_re = -(CIR_FEEDBACK_RESISTOR_OHM * h_re) /
                h_magnitude_squared;
-        z_im = -(CIR_FEEDBACK_RESISTOR_OHM * h_im) /
+        z_im = (CIR_FEEDBACK_RESISTOR_OHM * h_im) /
                h_magnitude_squared;
         z_magnitude = CIR_FEEDBACK_RESISTOR_OHM / h_magnitude;
 
@@ -141,6 +151,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         !CircuitID_IsFinite(output->y_mag_siemens) ||
         !CircuitID_IsFinite(output->y_phase_deg))
     {
+        Screen_ReportError(SCREEN_E14_CIR_ZY_NAN);
         (void)memset(output, 0, sizeof(*output));
         return 0u;
     }

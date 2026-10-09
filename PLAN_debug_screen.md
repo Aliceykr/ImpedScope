@@ -12,7 +12,7 @@
 | `t1` | 阻抗幅值 \|Z\|（Ω） | `zmag:1234.56` |
 | `t2` | 阻抗相位（°） | `zph:-12.34` |
 | `t3` | 心跳计数 | `beat:1234` |
-| `t4` | 运行阶段或错误 | `stage:LOOP`、`stage:E06 SPI_FRAME x12` |
+| `t4` | 运行阶段或错误 | `stage:LOOP`、`stage:E03 SPI_FRAME x12` |
 
 每个文本框都必须带标签前缀（`freq:`、`zmag:`、`zph:`、`beat:`、`stage:`），不能只显示数字。
 
@@ -47,18 +47,25 @@
 |---|---|
 | `BOOT` | `main()` 中 `MPU_Config()` 之前 |
 | `CLK` | `SystemClock_Config()` 和 `PeriphCommonClock_Config()` 之后（`USER CODE BEGIN SysInit`） |
-| `PERIPH` | `USER CODE BEGIN 2` 开始处，即所有 `MX_*_Init()` 之后 |
-| `MODULE` | `CircuitID_Init()`、`Screen_Init()` 之后 |
+| `PERIPH` | `USER CODE BEGIN 2` 内、`Screen_Init()` 之后、所有 `MX_*_Init()` 完成时 |
+| `MODULE` | `CircuitID_Init()` 之后 |
 | `SPI` | `SPI_Receiver_Init()` 成功之后 |
 | `LOOP` | `while (1)` 循环开始前 |
 
+`USER CODE BEGIN 2` 内实际顺序为：`Screen_Init()` → `SetStage("PERIPH")` → `CircuitID_Init()` → `SetStage("MODULE")` → `SPI_Receiver_Init()` → `SetStage("SPI")`。
+
 阶段设置不写入 CubeMX 生成的代码区，避免重新生成时丢失。
+
+**可见性限制（重要）**：`Screen_Poll()` 只在主循环中运行，而主循环在 `SetStage("LOOP")` 之后才开始。为让启动阶段可见，`Screen_SetStage()` 在 UART4 已就绪（`s_uart_ready==1`）时会**立即阻塞发送**一次 t4 并保持约 150 ms。因此：
+
+- `BOOT`、`CLK` 打点时 `MX_UART4_Init()` 尚未执行，只保存在内存中，屏幕不可见（物理限制）。
+- `PERIPH`、`MODULE`、`SPI`、`LOOP` 打点时 UART 已就绪，屏幕依次可见。
 
 ## 6. 错误显示规则
 
 工程中的每个错误判断都要上报到 `t4`，规则如下：
 
-1. **每个错误有唯一码**，格式 `Exx 名称`，如 `E06 SPI_FRAME`。
+1. **每个错误有唯一码**，格式 `Exx 名称`，如 `E03 SPI_FRAME`。
 2. **非致命错误**：`t4` 显示最近一次事件，格式 `stage:Exx 名称 xN`，其中 `N` 是该码自上电以来的累计次数（16 位，溢出后回绕）。新的阶段或错误会覆盖之前的显示。
 3. **致命错误**（`Error_Handler()` 触发）：`t4` 锁定显示，不被后续事件覆盖。
 4. **中断中不能直接发送串口**。`HAL_SPI_RxCpltCallback` 等 DMA 回调中只记录错误码和计数（使用 `volatile` 变量），由主循环的 `Screen_Poll()` 统一显示。
@@ -68,27 +75,24 @@
 
 | 码 | 名称 | 位置 | 触发条件 | 类型 |
 |---|---|---|---|---|
-| E01 | CLK_OSC | `main.c` 约 175 行 | `HAL_RCC_OscConfig()` 失败 | 致命 |
-| E02 | CLK_BUS | `main.c` 约 193 行 | `HAL_RCC_ClockConfig()` 失败 | 致命 |
-| E03 | CLK_PER | `main.c` 约 211 行 | `HAL_RCCEx_PeriphCLKConfig()` 失败 | 致命 |
-| E04 | HAL_INIT | `spi.c`、`usart.c`（CubeMX 生成） | `MX_SPI1_Init()`、`MX_UART4_Init()` 中的 `Error_Handler()` 调用 | 致命 |
-| E05 | SPI_DMA | `main.c` 约 110 行 | `SPI_Receiver_Init()` 返回 0 | 致命 |
-| E06 | SPI_FRAME | `spi_receiver.c` 约 51 行 | 帧头或帧尾不匹配（同步丢弃，属于正常现象，但需计数） | 非致命 |
-| E07 | SPI_NAN | `spi_receiver.c` 约 62、70、78、86 行 | 帧内浮点字段为 NaN 或 Inf | 非致命 |
-| E08 | SPI_LEN | `spi_receiver.c` 约 45 行 | `sizeof(float) != sizeof(uint32_t)` | 致命 |
-| E09 | SPI_QFULL | `spi_receiver.c` 约 170 行 | 队列已满，丢弃最旧频点 | 非致命 |
-| E10 | CIR_CFG | `circuit_id.c` 约 40 行 | 反馈电阻 R ≤ 0 或频率为 0 | 非致命 |
-| E11 | CIR_NAN_IN | `circuit_id.c` 约 53 行 | 输入 Ui、Uo 为 NaN 或 Inf | 非致命 |
-| E12 | CIR_UI_LOW | `circuit_id.c` 约 60 行 | \|Ui\| 小于 `CIR_INPUT_MIN_MAG` | 非致命 |
-| E13 | CIR_UO_LOW | `circuit_id.c` 约 67 行 | \|Uo\| 小于 `CIR_OUTPUT_MIN_MAG` | 非致命 |
-| E14 | CIR_H_NAN | `circuit_id.c` 约 80 行 | H 为非有限值 | 非致命 |
-| E15 | CIR_OUT_NAN | `circuit_id.c` 约 94 行 | 频率、dB、相位输出为非有限值 | 非致命 |
-| E16 | CIR_H_LOW | `circuit_id.c` 约 102 行 | \|H\| 过小，阻抗无法计算 | 非致命 |
-| E17 | CIR_ZY_NAN | `circuit_id.c` 约 145 行 | Z 或 Y 结果为非有限值 | 非致命 |
-| E18 | UART_TX | `screen.c` 约 53 行 | `HAL_UART_Transmit_IT()` 返回非 `HAL_OK` | 非致命 |
-| E19 | UART_BUSY | `screen.c` 约 36 行 | 上一条指令未发送完，本周期跳过 | 非致命 |
+| E01 | HAL_INIT | `spi.c`、`usart.c`（CubeMX 生成） | `MX_SPI1_Init()`、`MX_UART4_Init()` 中的 `Error_Handler()` 调用；无法区分具体外设，作为默认致命码 | 致命 |
+| E02 | SPI_DMA | `main.c` USER CODE BEGIN 2 | `SPI_Receiver_Init()` 返回 0 | 致命 |
+| E03 | SPI_FRAME | `spi_receiver.c` ParseFrame | 帧头或帧尾不匹配（同步丢弃，属于正常现象，但需计数） | 非致命 |
+| E04 | SPI_NAN | `spi_receiver.c` ParseFrame | 帧内浮点字段为 NaN 或 Inf | 非致命 |
+| E05 | SPI_LEN | `spi_receiver.c` SPI_Receiver_Init | `sizeof(float) != sizeof(uint32_t)` | 致命 |
+| E06 | SPI_QFULL | `spi_receiver.c` QueuePoint | 队列已满，丢弃最旧频点 | 非致命 |
+| E07 | CIR_CFG | `circuit_id.c` CircuitID_Compute | 反馈电阻 R ≤ 0 或频率为 0 | 非致命 |
+| E08 | CIR_NAN_IN | `circuit_id.c` CircuitID_Compute | 输入 Ui、Uo 为 NaN 或 Inf | 非致命 |
+| E09 | CIR_UI_LOW | `circuit_id.c` CircuitID_Compute | \|Ui\| 小于 `CIR_INPUT_MIN_MAG` | 非致命 |
+| E10 | CIR_UO_LOW | `circuit_id.c` CircuitID_Compute | \|Uo\| 小于 `CIR_OUTPUT_MIN_MAG` | 非致命 |
+| E11 | CIR_H_NAN | `circuit_id.c` CircuitID_Compute | H 为非有限值 | 非致命 |
+| E12 | CIR_OUT_NAN | `circuit_id.c` CircuitID_Compute | 频率、dB、相位输出为非有限值 | 非致命 |
+| E13 | CIR_H_LOW | `circuit_id.c` CircuitID_Compute | \|H\| 小于 `CIR_H_MIN_MAG`，阻抗无法计算 | 非致命 |
+| E14 | CIR_ZY_NAN | `circuit_id.c` CircuitID_Compute | Z 或 Y 结果为非有限值 | 非致命 |
+| E15 | UART_TX | `screen.c` Screen_Poll | `HAL_UART_Transmit_IT()` 返回非 `HAL_OK` | 非致命 |
+| E16 | UART_BUSY | `screen.c` Screen_Poll | 上一条指令未发送完，本周期跳过 | 非致命 |
 
-注：行号为当前代码的大致位置，实现前需以实际代码为准。`E04` 的具体生成代码位置无法区分，显示时以 `t4` 中最近的阶段名作为参考。
+注：E01 是默认致命码，CubeMX 生成的 `MX_*_Init()` 内部直接调用 `Error_Handler()`，无法区分具体外设，统一显示 E01。时钟配置失败（OscConfig / ClockConfig / PeriphClkConfig）发生在 UART4 初始化之前，屏幕物理上无法显示，未纳入错误码表，只能用调试器定位。
 
 ### 6.2 致命错误处理
 
@@ -102,12 +106,12 @@
 
 ## 7. 验收
 
-1. 上电后 `t4` 依次显示 `BOOT`、`CLK`、`PERIPH`、`MODULE`、`SPI`、`LOOP`，每一步都能看到。
+1. 上电后 `t4` 依次显示 `PERIPH`、`MODULE`、`SPI`、`LOOP`，每一步保持约 150 ms 可见（`BOOT`、`CLK` 发生在 UART 初始化前，屏幕不可见，属物理限制）。
 2. `t4` 稳定在 `LOOP` 后，`t3` 每 0.5 s 增加 1。
 3. 没有 FPGA 数据时，`t0`~`t2` 显示 `freq:-`、`zmag:-`、`zph:-`，`t3` 仍然增加。
 4. 有有效频点时，`t0`~`t2` 显示正确数值，格式与标签前缀一致。
 5. 人为让主循环卡住，`t3` 停止变化。
-6. 发送错误的 SPI 数据（如 NaN 字段），`t4` 显示 `E07` 并且计数增加。
+6. 发送错误的 SPI 数据（如 NaN 字段），`t4` 显示 `E04` 并且计数增加。
 7. 在 `main.c` 中临时调用 `Error_Handler()`，`t4` 显示致命错误码并锁定，不被后续事件覆盖。
 8. 在 Keil 中编译通过，并在硬件上逐项确认。
 

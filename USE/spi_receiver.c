@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "screen.h"
+
 /* DMA 半传输和全传输回调各处理一帧长度的数据。 */
 static uint8_t s_spi_receive_buffer[SPI_DMA_BUFFER_BYTES];
 static uint8_t s_frame_candidate[SPI_FRAME_TOTAL_BYTES];
@@ -24,6 +26,12 @@ uint8_t SPI_Receiver_Init(void)
     s_point_queue_head = 0u;
     s_point_queue_tail = 0u;
 
+    /* 编译期约定：IEEE-754 单精度必须和 uint32_t 同宽。 */
+    if (sizeof(float) != sizeof(uint32_t))
+    {
+        Screen_Fatal(SCREEN_E05_SPI_LEN);   /* 不返回 */
+    }
+
     return (HAL_SPI_Receive_DMA(&hspi1,
                                 s_spi_receive_buffer,
                                 SPI_DMA_BUFFER_BYTES) == HAL_OK) ? 1u : 0u;
@@ -40,14 +48,13 @@ uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out)
     }
 
     (void)memset(out, 0, sizeof(*out));
-    if (sizeof(float) != sizeof(uint32_t))
-    {
-        return 0u;
-    }
+
+    /* sizeof(float)==sizeof(uint32_t) 已在 SPI_Receiver_Init() 中保证。 */
 
     if (raw[0u] != SPI_FRAME_START_MARKER ||
         raw[SPI_FRAME_TOTAL_BYTES - 1u] != SPI_FRAME_END_MARKER)
     {
+        Screen_ReportError(SCREEN_E03_SPI_FRAME);
         return 0u;
     }
 
@@ -58,6 +65,7 @@ uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out)
     raw_value = SPI_Receiver_AssembleWord(&payload[4u]);
     if ((raw_value & 0x7F800000u) == 0x7F800000u)
     {
+        Screen_ReportError(SCREEN_E04_SPI_NAN);
         (void)memset(out, 0, sizeof(*out));
         return 0u;
     }
@@ -66,6 +74,7 @@ uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out)
     raw_value = SPI_Receiver_AssembleWord(&payload[8u]);
     if ((raw_value & 0x7F800000u) == 0x7F800000u)
     {
+        Screen_ReportError(SCREEN_E04_SPI_NAN);
         (void)memset(out, 0, sizeof(*out));
         return 0u;
     }
@@ -74,6 +83,7 @@ uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out)
     raw_value = SPI_Receiver_AssembleWord(&payload[12u]);
     if ((raw_value & 0x7F800000u) == 0x7F800000u)
     {
+        Screen_ReportError(SCREEN_E04_SPI_NAN);
         (void)memset(out, 0, sizeof(*out));
         return 0u;
     }
@@ -82,6 +92,7 @@ uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FFT_Point_t *out)
     raw_value = SPI_Receiver_AssembleWord(&payload[16u]);
     if ((raw_value & 0x7F800000u) == 0x7F800000u)
     {
+        Screen_ReportError(SCREEN_E04_SPI_NAN);
         (void)memset(out, 0, sizeof(*out));
         return 0u;
     }
@@ -170,6 +181,7 @@ static void SPI_Receiver_QueuePoint(const FFT_Point_t *point)
     if (next_head == s_point_queue_tail)
     {
         /* 队列满时丢弃最旧数据，保留最新测量值。 */
+        Screen_ReportError(SCREEN_E06_SPI_QFULL);
         s_point_queue_tail =
             (uint8_t)((s_point_queue_tail + 1u) % SPI_POINT_QUEUE_SIZE);
     }

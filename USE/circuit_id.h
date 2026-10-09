@@ -34,6 +34,9 @@ extern "C" {
 #define CIR_INPUT_MIN_MAG           1e-4f
 #define CIR_OUTPUT_MIN_MAG          1e-6f
 
+/* |H| 下限：低于此值阻抗趋于无穷、结果不可靠。与输出幅值门限独立调参。 */
+#define CIR_H_MIN_MAG               1e-6f
+
 typedef struct
 {
     float frequency_hz;
