@@ -7,19 +7,16 @@
 #include "screen.h"
 
 #define CIR_PI              3.14159265358979323846f
-/* log10f 的参数不能为 0，加一个极小值避免得到 -Inf。 */
 #define CIR_LOG_GUARD       1e-20f
 
-static float CircuitID_FrequencyToHz(uint32_t raw_frequency);
 static uint8_t CircuitID_IsFinite(float value);
 
-/* 目前没有需要初始化的状态。保留此函数，供以后的多帧平均等功能使用，main.c 启动时调用。 */
 void CircuitID_Init(void)
 {
+    /* 当前为单帧扫频模式，暂时没有运行时状态。 */
 }
 
-/* 计算一个频点的传递函数 H、阻抗 Z 和导纳 Y。成功返回 1；失败返回 0，且输出全部清零。 */
-uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
+uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
 {
     float ui_re;
     float ui_im;
@@ -32,29 +29,47 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     float h_magnitude_squared;
     float h_magnitude;
 
-    if ((input == (const FFT_Point_t *)0) ||
+    if ((input == (const FPGA_Record_t *)0) ||
         (output == (FRF_Point_t *)0))
     {
         return 0u;
     }
 
-    /* 先清零输出，失败返回时调用方拿到的全是 0。 */
     (void)memset(output, 0, sizeof(*output));
 
-    /* 配置检查：反馈电阻必须为正，频率为 0 无意义。 */
-    if ((CIR_FEEDBACK_RESISTOR_OHM <= 0.0f) ||
-        (input->freq == 0u))
+    if (CIR_FEEDBACK_RESISTOR_OHM <= 0.0f)
     {
         Screen_ReportError(SCREEN_E07_CIR_CFG);
         return 0u;
     }
 
-    ui_re = input->ui_re;
-    ui_im = input->ui_im;
-    uo_re = input->uo_re;
-    uo_im = input->uo_im;
+    /* 两通道峰值 bin 必须一致，否则 Ui、Uo 不在同一频点（PLAN 决策 A）。 */
+    if (input->index0 != input->index1)
+    {
+        Screen_ReportError(SCREEN_E17_BIN_MISMATCH);
+        return 0u;
+    }
 
-    /* 输入必须是有限数，NaN 或 Inf 会让后面所有结果都无效。 */
+    /* 实信号 FFT：bin N/2+1 … N-1 是 1 … N/2-1 的镜像，镜像 bin 分量
+     * 虚部反号会使 H 相位反号，故直接拒绝（bin N/2 奈奎斯特保留）。 */
+    if (input->index0 > (CIR_FFT_POINTS / 2u))
+    {
+        Screen_ReportError(SCREEN_E03_SPI_FRAME);
+        return 0u;
+    }
+
+    if (input->index0 == 0u)
+    {
+        Screen_ReportError(SCREEN_E07_CIR_CFG);
+        return 0u;
+    }
+
+    /* CH0 = Ui，CH1 = Uo；定点值乘比例系数还原电压。 */
+    ui_re = (float)input->ch0_re * CIR_FFT_SCALE;
+    ui_im = (float)input->ch0_im * CIR_FFT_SCALE;
+    uo_re = (float)input->ch1_re * CIR_FFT_SCALE;
+    uo_im = (float)input->ch1_im * CIR_FFT_SCALE;
+
     if (!CircuitID_IsFinite(ui_re) || !CircuitID_IsFinite(ui_im) ||
         !CircuitID_IsFinite(uo_re) || !CircuitID_IsFinite(uo_im))
     {
@@ -62,7 +77,6 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         return 0u;
     }
 
-    /* |Ui|² 太小时，H = Uo / Ui 会被噪声放大，结果失真，直接丢弃。 */
     ui_magnitude_squared = (ui_re * ui_re) + (ui_im * ui_im);
     if (!CircuitID_IsFinite(ui_magnitude_squared) ||
         ui_magnitude_squared <= (CIR_INPUT_MIN_MAG * CIR_INPUT_MIN_MAG))
@@ -71,7 +85,6 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         return 0u;
     }
 
-    /* |Uo| 太小说明输出几乎没有信号，无法可靠计算。 */
     uo_magnitude_squared = (uo_re * uo_re) + (uo_im * uo_im);
     if (!CircuitID_IsFinite(uo_magnitude_squared) ||
         uo_magnitude_squared <= (CIR_OUTPUT_MIN_MAG * CIR_OUTPUT_MIN_MAG))
@@ -80,7 +93,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         return 0u;
     }
 
-    /* H = Uo / Ui。分子和分母同乘 conj(Ui)，分母变成实数 |Ui|²，便于计算。 */
+    /* H = Uo * conj(Ui) / |Ui|^2。 */
     h_re = ((uo_re * ui_re) + (uo_im * ui_im)) /
            ui_magnitude_squared;
     h_im = ((uo_im * ui_re) - (uo_re * ui_im)) /
@@ -96,8 +109,8 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
 
     h_magnitude = sqrtf(h_magnitude_squared);
 
-    /* 幅值换算成 dB：20·log10|H|；相位 = atan2(虚部, 实部)，再从弧度换算成度。 */
-    output->frequency_hz = CircuitID_FrequencyToHz(input->freq);
+    output->frequency_hz = ((float)input->index0 * CIR_SAMPLE_RATE_HZ) /
+                           (float)CIR_FFT_POINTS;
     output->h_magnitude_dB = 20.0f * log10f(h_magnitude + CIR_LOG_GUARD);
     output->h_phase_deg = atan2f(h_im, h_re) * 180.0f / CIR_PI;
 
@@ -111,7 +124,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     }
 
 #if CIR_DUT_TOPOLOGY == 1u
-    /* |H| 太小时 Z 会趋于无穷大，结果不可靠，丢弃该频点。 */
+    /* H 过小表示阻抗趋于无穷，结果不可靠。 */
     if (h_magnitude_squared <= (CIR_H_MIN_MAG * CIR_H_MIN_MAG))
     {
         Screen_ReportError(SCREEN_E13_CIR_H_LOW);
@@ -124,16 +137,14 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         float z_im;
         float z_magnitude;
 
-        /* Z = -R / H。分子分母同乘 conj(H)，分母变成实数 |H|²。
-         * 结果：实部 = -R*h_re/|H|²，虚部 = +R*h_im/|H|²。 */
+        /* Z = -R / H = -R * conj(H) / |H|^2
+         *     = (-R*h_re + j*R*h_im) / |H|^2。 */
         z_re = -(CIR_FEEDBACK_RESISTOR_OHM * h_re) /
                h_magnitude_squared;
         z_im = (CIR_FEEDBACK_RESISTOR_OHM * h_im) /
                h_magnitude_squared;
-        /* |Z| = R / |H|，分子 R 是实数，只需除以 |H|。 */
         z_magnitude = CIR_FEEDBACK_RESISTOR_OHM / h_magnitude;
 
-        /* 阻抗幅值转 dB；相位同样用 atan2 求出并换算成度。 */
         output->z_mag_ohm = z_magnitude;
         output->z_mag_dB = 20.0f * log10f(z_magnitude + CIR_LOG_GUARD);
         output->z_phase_deg = atan2f(z_im, z_re) * 180.0f / CIR_PI;
@@ -144,7 +155,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         float y_im;
         float y_magnitude;
 
-        /* Y = -H / R。R 是实数，所以实部和虚部都直接除以 R。 */
+        /* Y = -H / R。 */
         y_re = -h_re / CIR_FEEDBACK_RESISTOR_OHM;
         y_im = -h_im / CIR_FEEDBACK_RESISTOR_OHM;
         y_magnitude = h_magnitude / CIR_FEEDBACK_RESISTOR_OHM;
@@ -152,10 +163,7 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
         output->y_mag_siemens = y_magnitude;
         output->y_phase_deg = atan2f(y_im, y_re) * 180.0f / CIR_PI;
     }
-#endif
 
-#if CIR_DUT_TOPOLOGY == 1u
-    /* Z、Y 的最终检查，任一结果非有限则整个频点作废。 */
     if (!CircuitID_IsFinite(output->z_mag_ohm) ||
         !CircuitID_IsFinite(output->z_mag_dB) ||
         !CircuitID_IsFinite(output->z_phase_deg) ||
@@ -172,29 +180,9 @@ uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output)
     return 1u;
 }
 
-/* 判断是否为有限数：NaN 不等于自身，Inf 超出 float 范围，两者都排除。 */
 static uint8_t CircuitID_IsFinite(float value)
 {
     return (uint8_t)((value == value) &&
                      (value <= FLT_MAX) &&
                      (value >= -FLT_MAX));
-}
-
-/* freq 是实际频率时只做单位换算；是 FFT bin 时，频率 = bin × 采样率 ÷ FFT 点数。 */
-static float CircuitID_FrequencyToHz(uint32_t raw_frequency)
-{
-#if CIR_FREQ_IS_RAW
-    float frequency_hz = (float)raw_frequency;
-
-  #if CIR_FREQ_UNIT == 2u
-    frequency_hz *= 1000000.0f;
-  #elif CIR_FREQ_UNIT == 1u
-    frequency_hz *= 1000.0f;
-  #endif
-
-    return frequency_hz;
-#else
-    return ((float)raw_frequency * CIR_SAMPLE_RATE_HZ) /
-           (float)CIR_FFT_POINTS;
-#endif
 }

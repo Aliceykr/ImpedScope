@@ -10,31 +10,24 @@ extern "C" {
 
 /*
  * 黑盒电路频响辨识。
- *
- * 电路原理：
- *   Ui 加在被测电路（DUT）两端，流过 DUT 的电流为 I = Ui * Y。
- *   运放反相端接近 0 V（虚地），电流全部流过反馈电阻 R，
- *   所以输出 Uo = -I * R。
- *
- * 由此推出：
- *   H = Uo / Ui      传递函数（复数）
- *   Y = -H / R       导纳
- *   Z = 1 / Y = -R / H   阻抗
+ * 前端是跨阻 I/V 放大器，运放反相端近似虚地，反馈电阻为 R：
+ *   I = Ui * Y       Uo = -I * R
+ *   H = Uo / Ui      Y  = -H / R
+ *   Z = 1 / Y = -R / H
  */
 
-/* 1：freq 是实际频率；0：freq 是 FFT bin。 */
-#define CIR_FREQ_IS_RAW             1u
-#define CIR_FREQ_UNIT               0u  /* 0：Hz，1：kHz，2：MHz */
-#define CIR_SAMPLE_RATE_HZ          1000000.0f
+/* FPGA FFT 参数：f = bin * fs / N。
+ * fs 按 adc0_clk = clk_40m 推断为 40 MSPS，待硬件实测确认。 */
+#define CIR_SAMPLE_RATE_HZ          40000000.0f
 #define CIR_FFT_POINTS              1024u
+
+/* 12 位定点 FFT 结果到电压的比例系数，待结合 FPGA scaled 配置校准。
+ * 算 H 时两路同缩放会约掉；算 |Z| 绝对值时必须已知。 */
+#define CIR_FFT_SCALE               1.0f
 
 /* 1：计算阻抗和导纳；0：只计算传递函数。 */
 #define CIR_DUT_TOPOLOGY            1u
 #define CIR_FEEDBACK_RESISTOR_OHM   1000.0f
-
-/* 预留给多帧平均功能；当前按单帧扫频处理。 */
-#define CIR_EXCITATION              0u
-#define CIR_AVERAGE_FRAMES          1u
 
 /* 输入和输出幅值下限，低于下限的频点标记为无效。 */
 #define CIR_INPUT_MIN_MAG           1e-4f
@@ -63,8 +56,8 @@ typedef struct
 /* 初始化频响辨识模块。当前无状态需要初始化。 */
 void CircuitID_Init(void);
 
-/* 计算一个频点；成功且结果有效时返回 1，否则返回 0。 */
-uint8_t CircuitID_Compute(const FFT_Point_t *input, FRF_Point_t *output);
+/* 计算一条 FPGA 记录；成功且结果有效时返回 1，否则返回 0。 */
+uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output);
 
 #ifdef __cplusplus
 }

@@ -119,12 +119,12 @@ int main(void)
   Screen_SetStage("LOOP");
   while (1)
   {
-    FFT_Point_t fft_point;
+    FPGA_Record_t fpga_record;
     FRF_Point_t frf_point;
 
-    while (SPI_Receiver_TryGetPoint(&fft_point) != 0u)
+    while (SPI_Receiver_TryGetRecord(&fpga_record) != 0u)
     {
-      if (CircuitID_Compute(&fft_point, &frf_point) != 0u)
+      if (CircuitID_Compute(&fpga_record, &frf_point) != 0u)
       {
         Screen_SetResult(&frf_point);
       }

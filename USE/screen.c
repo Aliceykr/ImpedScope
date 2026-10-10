@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "spi_receiver.h"
+
 /* 指令格式：控件名.txt="值" + 0xFF 0xFF 0xFF。 */
 #define SCREEN_CMD_END_BYTE          0xFFu
 #define SCREEN_CMD_END_COUNT         3u
@@ -31,7 +33,8 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "CIR_H_LOW",    /* E13 */
     "CIR_ZY_NAN",   /* E14 */
     "UART_TX",      /* E15 */
-    "UART_BUSY"     /* E16 */
+    "UART_BUSY",    /* E16 */
+    "BIN_MISMATCH"  /* E17 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */
@@ -209,8 +212,26 @@ static uint16_t Screen_BuildCommands(void)
 {
     char value[SCREEN_VALUE_CHARS];
     uint16_t length = 0u;
-    uint8_t  code;
+#if SCREEN_SPI_TEST == 1u
+    SPI_Stats_t stats;
+    uint8_t     index;
 
+    SPI_Receiver_GetStats(&stats);
+#else
+    uint8_t code;
+#endif
+
+#if SCREEN_SPI_TEST == 1u
+    /* 测试模式：t0~t2 显示收包计数，用于判断 CS、字节数和帧头是否正确。 */
+    (void)snprintf(value, sizeof(value), "cs:%lu", (unsigned long)stats.cs_falling);
+    length = Screen_AppendCommand(length, "t0", value);
+
+    (void)snprintf(value, sizeof(value), "full:%lu", (unsigned long)stats.frame_full);
+    length = Screen_AppendCommand(length, "t1", value);
+
+    (void)snprintf(value, sizeof(value), "hdr:%lu", (unsigned long)stats.frame_ok);
+    length = Screen_AppendCommand(length, "t2", value);
+#else
     /* t0：频率 */
     if (s_has_result != 0u)
     {
@@ -243,11 +264,21 @@ static uint16_t Screen_BuildCommands(void)
         (void)snprintf(value, sizeof(value), "zph:-");
     }
     length = Screen_AppendCommand(length, "t2", value);
+#endif
 
     /* t3：心跳 */
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
     length = Screen_AppendCommand(length, "t3", value);
 
+#if SCREEN_SPI_TEST == 1u
+    /* t4：最近一次收满的原始帧，格式 raw:十六进制（16 字节）。 */
+    (void)snprintf(value, sizeof(value), "raw:");
+    for (index = 0u; index < SPI_FRAME_TOTAL_BYTES; ++index)
+    {
+        (void)snprintf(&value[4u + ((uint16_t)index * 2u)], 3u, "%02X",
+                       (unsigned)stats.last_frame[index]);
+    }
+#else
     /* t4：阶段或最近一次错误 */
     if (s_fatal_latched != 0u)
     {
@@ -268,6 +299,7 @@ static uint16_t Screen_BuildCommands(void)
             (void)snprintf(value, sizeof(value), "stage:%s", s_stage);
         }
     }
+#endif
     length = Screen_AppendCommand(length, "t4", value);
 
     return length;
