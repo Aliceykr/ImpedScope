@@ -240,11 +240,12 @@ Z 相位 = -90°
 | `CIR_FFT_SCALE` | 1.0 | 12 位定点到电压的比例，待 FPGA 缩放校准 |
 | `CIR_DUT_TOPOLOGY` | 1 | 1：计算 Z 和 Y；0：只计算 H |
 | `CIR_FEEDBACK_RESISTOR_OHM` | 1000.0 | 反馈电阻 R |
-| `CIR_INPUT_MIN_MAG` | 1e-4 | `|Ui|` 下限 |
-| `CIR_OUTPUT_MIN_MAG` | 1e-6 | `|Uo|` 下限 |
+| `CIR_INPUT_MIN_MAG` | 1.0 | `|Ui|` 下限（1 LSB，见下方说明） |
+| `CIR_OUTPUT_MIN_MAG` | 1.0 | `|Uo|` 下限（1 LSB，见下方说明） |
 | `CIR_H_MIN_MAG` | 1e-6 | `|H|` 下限，低于此值 Z 不可靠 |
 
 算 H 时两路同缩放会约掉，`CIR_FFT_SCALE` 不影响 H；算 `|Z|` 绝对值时必须已知该比例。幅值门限需要根据 FPGA 的 FFT 缩放方式和实际噪声水平校准。
+当前 `CIR_INPUT_MIN_MAG` / `CIR_OUTPUT_MIN_MAG` 取 1.0（1 LSB）：12 位定点下 `|U|2` 是非负整数，任何小于 1 的门限都只能拒绝恰好为零的频点，等价于“非零”判断。FPGA 缩放标定后应把 `CIR_FFT_SCALE` 与这两个门限一并改为物理电压值。
 
 CS 引脚在 [USE/spi_receiver.h](USE/spi_receiver.h) 中由 `SPI_CS_GPIO_PORT`、`SPI_CS_PIN` 定义。更换引脚时，需同时修改这两个宏、`.ioc` 中的 PA4 配置，以及 `spi.c` 中的 GPIO 与 EXTI 配置。
 
@@ -319,6 +320,12 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
+## 9. 已知限制
+
+- **两路峰值 bin 不一致的帧被丢弃（E17）。** 详见 9.1 节。
+- **FPGA 配置字与 FFT IP 的定义可能不一致。** 按 `xfft_0` 的 testbench，CH1 的正/逆变换标志位应在配置字 bit 1，而 `axis_config.v` 拼接时将其放在 bit 11。这会影响 CH1 的频谱，由 FPGA 侧处理，MCU 无法检测。
+- **FPGA 实际发送字节数待确认。** 按 `data_stute.v` 的状态机推断，第 15 字节可能不会发出。需要用逻辑分析仪确认实际帧长。
+
 ### 9.1 两路峰值 bin 不一致（E17）
 
 **现象。** 每帧的 `index0`（CH0，即 Ui 的峰值 bin）和 `index1`（CH1，即 Uo 的峰值 bin）可能不同。`index0 != index1` 时，`CircuitID_Compute()` 丢弃该帧并报 E17。
@@ -344,13 +351,7 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以
 | B | 以 `index0` 为频率，FPGA 同时输出 CH1 在 `index0` 处的值 | 不需要峰值相等，但 FPGA 要增加取值通路 |
 | C | FPGA 逐 bin 输出，每帧 `index0 = index1 = k`，峰值搜索删除 | 每个频点都有完整 H，频响曲线最完整；SPI 传输量增加，需确认 MCU 能跟上 |
 
-若 E17 占比过高，建议转向方案 C。方案 C 需要先修复 FPGA 的 FFT 配置字位序（见本节上方“已知限制”），否则两路频谱本身不可信。
-
-## 9. 已知限制
-
-- **两路峰值 bin 不一致的帧被丢弃（E17）。** 详见 9.1 节。
-- **FPGA 配置字与 FFT IP 的定义可能不一致。** 按 `xfft_0` 的 testbench，CH1 的正/逆变换标志位应在配置字 bit 1，而 `axis_config.v` 拼接时将其放在 bit 11。这会影响 CH1 的频谱，由 FPGA 侧处理，MCU 无法检测。
-- **FPGA 实际发送字节数待确认。** 按 `data_stute.v` 的状态机推断，第 15 字节可能不会发出。需要用逻辑分析仪确认实际帧长。
+若 E17 占比过高，建议转向方案 C。方案 C 需要先修复 FPGA 的 FFT 配置字位序（见上方“已知限制”），否则两路频谱本身不可信。
 
 ## 10. 编译与维护
 

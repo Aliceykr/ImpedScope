@@ -14,6 +14,11 @@
 #define SCREEN_BLOCKING_TIMEOUT_MS   100u   /* 9600bps 下一条 t4 约 30ms */
 #define SCREEN_STAGE_HOLD_MS         150u   /* 启动阶段肉眼保持时间 */
 
+/* 致命路径有界轮询的上限。关中断后 SysTick 已停,HAL 的 tick 超时失效
+ * (HAL_MAX_DELAY 永不超时,有限值也因 tick 冻结而永不到期),故这里用
+ * 纯计数器兜底,保证 UART 无响应时也能退出,而不是死等。 */
+#define SCREEN_FATAL_SPIN_LIMIT      2000000u
+
 /* 错误码对应的短名称，索引 0 不使用。 */
 static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
 {
@@ -55,6 +60,7 @@ static volatile uint8_t  s_uart_ready;
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
 static void Screen_SendT4Blocking(const char *value, uint32_t timeout);
+static void Screen_SendT4Raw(const char *value);
 
 void Screen_Init(void)
 {
@@ -141,10 +147,62 @@ void Screen_FatalReportBlocking(void)
         return;
     }
 
-    /* 关中断状态下调用：SysTick 已停，超时必须用 HAL_MAX_DELAY。 */
+    /* 关中断、SysTick 已停：tick 超时不可用，改用有界轮询。 */
     (void)snprintf(value, sizeof(value), "stage:E%02d %s",
                    (unsigned)s_fatal_code, s_error_names[s_fatal_code]);
-    Screen_SendT4Blocking(value, HAL_MAX_DELAY);
+    Screen_SendT4Raw(value);
+}
+
+/* 致命路径专用的阻塞发送:不 abort、不依赖 HAL 状态与 SysTick。
+ * 停掉可能在跑的 IT/DMA 发送请求,清标志,再按计数器有界等待 TXE/TC。
+ * 关中断后 SysTick 已停:HAL_MAX_DELAY 永不超时,有限超时也永不
+ * 到期(GetTick 差恒为 0),所以必须绕开 HAL 的 tick 超时机制。 */
+static void Screen_SendT4Raw(const char *value)
+{
+    uint16_t length = 0u;
+    uint16_t remaining;
+    const uint8_t *cursor;
+    uint32_t spin;
+
+    length = Screen_AppendCommand(length, "t4", value);
+
+    /* 丢弃上一次未能完成的传输:只清发送请求位,不动 gState。 */
+    ATOMIC_CLEAR_BIT(huart4.Instance->CR1, (USART_CR1_TXEIE_TXFNFIE | USART_CR1_TCIE));
+    ATOMIC_CLEAR_BIT(huart4.Instance->CR3, USART_CR3_DMAT);
+    __HAL_UART_CLEAR_FLAG(&huart4, UART_CLEAR_OREF | UART_CLEAR_NEF |
+                                   UART_CLEAR_PEF | UART_CLEAR_FEF);
+
+    cursor = s_tx_buffer;
+    remaining = length;
+    while (remaining > 0u)
+    {
+        spin = SCREEN_FATAL_SPIN_LIMIT;
+        while ((__HAL_UART_GET_FLAG(&huart4, UART_FLAG_TXE) == RESET) &&
+               (spin != 0u))
+        {
+            --spin;
+        }
+        if (spin == 0u)
+        {
+            break;   /* UART 无响应:放弃本轮,不再死等 */
+        }
+        huart4.Instance->TDR = (uint8_t)(*cursor & 0xFFu);
+        ++cursor;
+        --remaining;
+    }
+
+    /* 等最后一字节移位完成(TC),同样有界。 */
+    spin = SCREEN_FATAL_SPIN_LIMIT;
+    while ((__HAL_UART_GET_FLAG(&huart4, UART_FLAG_TC) == RESET) &&
+           (spin != 0u))
+    {
+        --spin;
+    }
+
+    /* 本函数直接写了硬件寄存器,HAL 的 gState 需还原,否则后续 HAL 调用
+     * 会因 gState 停在 BUSY_TX 而一律返回 HAL_BUSY。 */
+    huart4.gState = HAL_UART_STATE_READY;
+    huart4.TxXferCount = 0u;
 }
 
 /* 阻塞发送一条 t4 指令；发送前 abort 残留的 IT 传输。 */
