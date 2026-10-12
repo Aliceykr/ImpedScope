@@ -129,12 +129,18 @@ int main(void)
   Screen_SetStage("LOOP");
   while (1)
   {
-    FPGA_Record_t fpga_record;
+    FREQ_Record_t freq_record;
+    ADC_Window_t window;
     FRF_Point_t frf_point;
 
-    while (SPI_Receiver_TryGetRecord(&fpga_record) != 0u)
+    while (SPI_Receiver_TryGetRecord(&freq_record) != 0u)
     {
-      if (CircuitID_Compute(&fpga_record, &frf_point) != 0u)
+      (void)ADC_Sampler_SetFrequency(freq_record.frequency_hz);
+    }
+
+    if (ADC_Sampler_GetWindow(&window) != 0u)
+    {
+      if (CircuitID_Compute(&window, &frf_point) != 0u)
       {
         Screen_SetResult(&frf_point);
       }

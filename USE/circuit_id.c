@@ -6,30 +6,28 @@
 
 #include "screen.h"
 
-#define CIR_PI              3.14159265358979323846f
-#define CIR_LOG_GUARD       1e-20f
+#define CIR_PI              3.14159265358979323846
+#define CIR_LOG_GUARD       1e-20
 
-static uint8_t CircuitID_IsFinite(float value);
+static uint8_t CircuitID_IsFinite(double value);
 
 void CircuitID_Init(void)
 {
-    /* 当前为单帧扫频模式，暂时没有运行时状态。 */
+    /* 当前为单频窗口模式，暂时没有运行时状态。 */
 }
 
-uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
+uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
 {
-    float ui_re;
-    float ui_im;
-    float uo_re;
-    float uo_im;
-    float ui_magnitude_squared;
-    float uo_magnitude_squared;
-    float h_re;
-    float h_im;
-    float h_magnitude_squared;
-    float h_magnitude;
+    double n;
+    double ui_mag;
+    double uo_mag;
+    double ui_mag2;
+    double h_re;
+    double h_im;
+    double h_magnitude_squared;
+    double h_magnitude;
 
-    if ((input == (const FPGA_Record_t *)0) ||
+    if ((input == (const ADC_Window_t *)0) ||
         (output == (FRF_Point_t *)0))
     {
         return 0u;
@@ -43,61 +41,40 @@ uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
         return 0u;
     }
 
-    /* 两通道峰值 bin 必须一致，否则 Ui、Uo 不在同一频点（PLAN 决策 A）。 */
-    if (input->index0 != input->index1)
-    {
-        Screen_ReportError(SCREEN_E17_BIN_MISMATCH);
-        return 0u;
-    }
-
-    /* 实信号 FFT：bin N/2+1 … N-1 是 1 … N/2-1 的镜像，镜像 bin 分量
-     * 虚部反号会使 H 相位反号，故直接拒绝（bin N/2 奈奎斯特保留）。 */
-    if (input->index0 > (CIR_FFT_POINTS / 2u))
-    {
-        Screen_ReportError(SCREEN_E03_SPI_FRAME);
-        return 0u;
-    }
-
-    if (input->index0 == 0u)
+    if ((input->frequency_hz == 0u) || (input->sample_count == 0u))
     {
         Screen_ReportError(SCREEN_E07_CIR_CFG);
         return 0u;
     }
 
-    /* CH0 = Ui，CH1 = Uo；定点值乘比例系数还原电压。 */
-    ui_re = (float)input->ch0_re * CIR_FFT_SCALE;
-    ui_im = (float)input->ch0_im * CIR_FFT_SCALE;
-    uo_re = (float)input->ch1_re * CIR_FFT_SCALE;
-    uo_im = (float)input->ch1_im * CIR_FFT_SCALE;
-
-    if (!CircuitID_IsFinite(ui_re) || !CircuitID_IsFinite(ui_im) ||
-        !CircuitID_IsFinite(uo_re) || !CircuitID_IsFinite(uo_im))
+    if (!CircuitID_IsFinite(input->ui_re) || !CircuitID_IsFinite(input->ui_im) ||
+        !CircuitID_IsFinite(input->uo_re) || !CircuitID_IsFinite(input->uo_im))
     {
         Screen_ReportError(SCREEN_E08_CIR_NAN_IN);
         return 0u;
     }
 
-    ui_magnitude_squared = (ui_re * ui_re) + (ui_im * ui_im);
-    if (!CircuitID_IsFinite(ui_magnitude_squared) ||
-        ui_magnitude_squared <= (CIR_INPUT_MIN_MAG * CIR_INPUT_MIN_MAG))
+    /* 单频幅值 = 2 |S| / N，单位为 ADC 码值。 */
+    n = (double)input->sample_count;
+    ui_mag = 2.0 * sqrt((input->ui_re * input->ui_re) + (input->ui_im * input->ui_im)) / n;
+    uo_mag = 2.0 * sqrt((input->uo_re * input->uo_re) + (input->uo_im * input->uo_im)) / n;
+
+    if (ui_mag < (double)CIR_INPUT_MIN_AMP)
     {
         Screen_ReportError(SCREEN_E09_CIR_UI_LOW);
         return 0u;
     }
 
-    uo_magnitude_squared = (uo_re * uo_re) + (uo_im * uo_im);
-    if (!CircuitID_IsFinite(uo_magnitude_squared) ||
-        uo_magnitude_squared <= (CIR_OUTPUT_MIN_MAG * CIR_OUTPUT_MIN_MAG))
+    if (uo_mag < (double)CIR_OUTPUT_MIN_AMP)
     {
         Screen_ReportError(SCREEN_E10_CIR_UO_LOW);
         return 0u;
     }
 
-    /* H = Uo * conj(Ui) / |Ui|^2。 */
-    h_re = ((uo_re * ui_re) + (uo_im * ui_im)) /
-           ui_magnitude_squared;
-    h_im = ((uo_im * ui_re) - (uo_re * ui_im)) /
-           ui_magnitude_squared;
+    /* H = Uo * conj(Ui) / |Ui|^2。两路 sample_count 相同，归一化约掉。 */
+    ui_mag2 = (input->ui_re * input->ui_re) + (input->ui_im * input->ui_im);
+    h_re = ((input->uo_re * input->ui_re) + (input->uo_im * input->ui_im)) / ui_mag2;
+    h_im = ((input->uo_im * input->ui_re) - (input->uo_re * input->ui_im)) / ui_mag2;
 
     h_magnitude_squared = (h_re * h_re) + (h_im * h_im);
     if (!CircuitID_IsFinite(h_re) || !CircuitID_IsFinite(h_im) ||
@@ -107,12 +84,11 @@ uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
         return 0u;
     }
 
-    h_magnitude = sqrtf(h_magnitude_squared);
+    h_magnitude = sqrt(h_magnitude_squared);
 
-    output->frequency_hz = ((float)input->index0 * CIR_SAMPLE_RATE_HZ) /
-                           (float)CIR_FFT_POINTS;
-    output->h_magnitude_dB = 20.0f * log10f(h_magnitude + CIR_LOG_GUARD);
-    output->h_phase_deg = atan2f(h_im, h_re) * 180.0f / CIR_PI;
+    output->frequency_hz = (float)input->frequency_hz;
+    output->h_magnitude_dB = (float)(20.0 * log10(h_magnitude + CIR_LOG_GUARD));
+    output->h_phase_deg = (float)(atan2(h_im, h_re) * 180.0 / CIR_PI);
 
     if (!CircuitID_IsFinite(output->frequency_hz) ||
         !CircuitID_IsFinite(output->h_magnitude_dB) ||
@@ -125,7 +101,7 @@ uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
 
 #if CIR_DUT_TOPOLOGY == 1u
     /* H 过小表示阻抗趋于无穷，结果不可靠。 */
-    if (h_magnitude_squared <= (CIR_H_MIN_MAG * CIR_H_MIN_MAG))
+    if (h_magnitude_squared <= ((double)CIR_H_MIN_MAG * (double)CIR_H_MIN_MAG))
     {
         Screen_ReportError(SCREEN_E13_CIR_H_LOW);
         (void)memset(output, 0, sizeof(*output));
@@ -133,35 +109,34 @@ uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
     }
 
     {
-        float z_re;
-        float z_im;
-        float z_magnitude;
+        double r = (double)CIR_FEEDBACK_RESISTOR_OHM;
+        double z_re;
+        double z_im;
+        double z_magnitude;
 
-        /* Z = -R / H = -R * conj(H) / |H|^2
-         *     = (-R*h_re + j*R*h_im) / |H|^2。 */
-        z_re = -(CIR_FEEDBACK_RESISTOR_OHM * h_re) /
-               h_magnitude_squared;
-        z_im = (CIR_FEEDBACK_RESISTOR_OHM * h_im) /
-               h_magnitude_squared;
-        z_magnitude = CIR_FEEDBACK_RESISTOR_OHM / h_magnitude;
+        /* Z = -R / H = -R * conj(H) / |H|^2。 */
+        z_re = -(r * h_re) / h_magnitude_squared;
+        z_im = (r * h_im) / h_magnitude_squared;
+        z_magnitude = r / h_magnitude;
 
-        output->z_mag_ohm = z_magnitude;
-        output->z_mag_dB = 20.0f * log10f(z_magnitude + CIR_LOG_GUARD);
-        output->z_phase_deg = atan2f(z_im, z_re) * 180.0f / CIR_PI;
+        output->z_mag_ohm = (float)z_magnitude;
+        output->z_mag_dB = (float)(20.0 * log10(z_magnitude + CIR_LOG_GUARD));
+        output->z_phase_deg = (float)(atan2(z_im, z_re) * 180.0 / CIR_PI);
     }
 
     {
-        float y_re;
-        float y_im;
-        float y_magnitude;
+        double r = (double)CIR_FEEDBACK_RESISTOR_OHM;
+        double y_re;
+        double y_im;
+        double y_magnitude;
 
         /* Y = -H / R。 */
-        y_re = -h_re / CIR_FEEDBACK_RESISTOR_OHM;
-        y_im = -h_im / CIR_FEEDBACK_RESISTOR_OHM;
-        y_magnitude = h_magnitude / CIR_FEEDBACK_RESISTOR_OHM;
+        y_re = -h_re / r;
+        y_im = -h_im / r;
+        y_magnitude = h_magnitude / r;
 
-        output->y_mag_siemens = y_magnitude;
-        output->y_phase_deg = atan2f(y_im, y_re) * 180.0f / CIR_PI;
+        output->y_mag_siemens = (float)y_magnitude;
+        output->y_phase_deg = (float)(atan2(y_im, y_re) * 180.0 / CIR_PI);
     }
 
     if (!CircuitID_IsFinite(output->z_mag_ohm) ||
@@ -180,9 +155,9 @@ uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output)
     return 1u;
 }
 
-static uint8_t CircuitID_IsFinite(float value)
+static uint8_t CircuitID_IsFinite(double value)
 {
     return (uint8_t)((value == value) &&
-                     (value <= FLT_MAX) &&
-                     (value >= -FLT_MAX));
+                     (value <= DBL_MAX) &&
+                     (value >= -DBL_MAX));
 }

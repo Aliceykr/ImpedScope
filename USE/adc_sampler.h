@@ -8,31 +8,48 @@ extern "C" {
 #include "main.h"
 
 /*
- * 两个 ADC 各自单通道采样，DMA 循环写入各自的缓冲区，由同一个 TIM6 TRGO 触发：
- *   ADC1，PA0_C（ADC1_INP0）：DUT 电压
- *   ADC2，PA1_C（ADC2_INP1）：电流转换后的电压
- * 当前只保存最近一对采样，数据流相关的上层接口待定。
+ * 两个 ADC 各自单通道，由同一个 TIM6 TRGO 触发，DMA 循环写入各自的缓冲区。
+ *   ADC1，PA0_C（ADC1_INP0）：DUT 电压 Ui
+ *   ADC2，PA1_C（ADC2_INP1）：电流转换后的电压 Uo
+ *
+ * 频率由 SPI 给出。每收到一个新频率，开始一个窗口：在两路上做该频率的单频 DFT，
+ * 窗口结束后得到 Ui、Uo 的复数分量，交给 CircuitID_Compute() 计算 H、Z、Y。
+ * 两路由同一 DMA 块边界开始累加，样本严格对齐。
  */
 
-/* 每个半缓冲区包含的采样对数。DMA 每填满半个缓冲区触发一次回调。 */
+/* TIM6 触发频率：APB1 定时器时钟 120 MHz，PSC=11、ARR=9，得 1 MHz。 */
+#define ADC_SAMPLER_RATE_HZ          1000000.0f
+
+/* 每个半缓冲区（一个 DMA 块）的采样点数。 */
 #define ADC_SAMPLER_PAIRS_PER_HALF   64u
 
-/* 码值到电压的换算：16 位满量程 65535，参考电压暂按 3.3 V，待实测确认。 */
-#define ADC_SAMPLER_FULL_SCALE       65535.0f
-#define ADC_SAMPLER_VREF_V           3.3f
+/* 窗口长度：约覆盖 CYCLES 个信号周期，并限制在 [WINDOW_MIN, WINDOW_MAX] 之间。
+ * 低频时 WINDOW_MAX 会限制周期数，此时窗口不再是整数周期，会有泄漏误差。 */
+#define ADC_SAMPLER_WINDOW_CYCLES    10u
+#define ADC_SAMPLER_WINDOW_MIN       1024u
+#define ADC_SAMPLER_WINDOW_MAX       1000000u
 
+/* 一个窗口的单频 DFT 结果。
+ * 幅值换算：|U| = 2 * sqrt(re^2 + im^2) / sample_count，单位为 ADC 码值。
+ * 两路使用同一个 sample_count，所以 H = Uo / Ui 与归一化无关。 */
 typedef struct
 {
-    uint16_t dut_voltage_raw;       /* 通道 0，16 位原始码值 */
-    uint16_t current_voltage_raw;   /* 通道 1，16 位原始码值 */
-    uint32_t sequence;              /* 每完成一个半缓冲区加 1，0 表示尚无数据 */
-} ADC_Sample_t;
+    uint32_t frequency_hz;
+    uint32_t sample_count;
+    double   ui_re;
+    double   ui_im;
+    double   uo_re;
+    double   uo_im;
+} ADC_Window_t;
 
-/* 校准并启动 ADC1、ADC2 的 DMA 采样，再启动 TIM6；成功返回 1，失败返回 0。 */
+/* 校准并启动两路 DMA，再启动 TIM6；成功返回 1，失败返回 0。 */
 uint8_t ADC_Sampler_Init(void);
 
-/* 取最近一对采样；尚无数据时返回 0。 */
-uint8_t ADC_Sampler_GetLatest(ADC_Sample_t *out);
+/* 设定当前频率并开始新窗口。频率相同则不重启；频率非法返回 0。 */
+uint8_t ADC_Sampler_SetFrequency(uint32_t frequency_hz);
+
+/* 取出最近完成的窗口；没有新窗口时返回 0。 */
+uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out);
 
 #ifdef __cplusplus
 }

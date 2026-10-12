@@ -6,39 +6,30 @@ extern "C" {
 #endif
 
 #include "main.h"
-#include "spi_receiver.h"
+#include "adc_sampler.h"
 
 /*
- * 黑盒电路频响辨识。
+ * 黑盒电路频响辨识（ADC 采样版）。
+ * 频率由 FPGA 经 SPI 给出，Ui、Uo 由两路 ADC 采集，在该频率上做单频 DFT。
  * 前端是跨阻 I/V 放大器，运放反相端近似虚地，反馈电阻为 R：
  *   I = Ui * Y       Uo = -I * R
  *   H = Uo / Ui      Y  = -H / R
  *   Z = 1 / Y = -R / H
+ *
+ * 注意：两路前端的增益不同会使 |H| 有固定偏差，目前尚未标定。
  */
-
-/* FPGA FFT 参数：f = bin * fs / N。
- * fs 按 adc0_clk = clk_40m 推断为 40 MSPS，待硬件实测确认。 */
-#define CIR_SAMPLE_RATE_HZ          40000000.0f
-#define CIR_FFT_POINTS              1024u
-
-/* 12 位定点 FFT 结果到电压的比例系数，待结合 FPGA scaled 配置校准。
- * 算 H 时两路同缩放会约掉；算 |Z| 绝对值时必须已知。 */
-#define CIR_FFT_SCALE               1.0f
 
 /* 1：计算阻抗和导纳；0：只计算传递函数。 */
 #define CIR_DUT_TOPOLOGY            1u
+
+/* 跨阻反馈电阻 R，单位 Ω。 */
 #define CIR_FEEDBACK_RESISTOR_OHM   1000.0f
 
-/* 输入和输出幅值下限,低于下限的频点标记为无效。
- * 单位随 CIR_FFT_SCALE:当前 SCALE = 1.0,故这里是原始 LSB。
- * 12 位定点时分量是整数,|U|^2 也是整数,取 1.0f(1 LSB)才与"整数幅值
- * 的最小非零值"对齐。原先的 1e-4 / 1e-6 都远小于 1 LSB,门限只能拒绝
- * 恰好为零的频点,等价于"非零"判断。待 FPGA 缩放标定后,把 SCALE 与这
- * 两个门限一并改成物理电压值,门限才会真正起"低于噪声底即丢弃"的作用。 */
-#define CIR_INPUT_MIN_MAG           1.0f
-#define CIR_OUTPUT_MIN_MAG          1.0f
+/* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值视为噪声，待实测确定。 */
+#define CIR_INPUT_MIN_AMP           4.0f
+#define CIR_OUTPUT_MIN_AMP          4.0f
 
-/* |H| 下限：低于此值阻抗趋于无穷、结果不可靠。与输出幅值门限独立调参。 */
+/* |H| 下限：低于此值阻抗趋于无穷，结果不可靠。 */
 #define CIR_H_MIN_MAG               1e-6f
 
 typedef struct
@@ -61,8 +52,8 @@ typedef struct
 /* 初始化频响辨识模块。当前无状态需要初始化。 */
 void CircuitID_Init(void);
 
-/* 计算一条 FPGA 记录；成功且结果有效时返回 1，否则返回 0。 */
-uint8_t CircuitID_Compute(const FPGA_Record_t *input, FRF_Point_t *output);
+/* 由一个窗口的 Ui、Uo 计算 H、Z、Y；成功且结果有效时返回 1，否则返回 0。 */
+uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output);
 
 #ifdef __cplusplus
 }

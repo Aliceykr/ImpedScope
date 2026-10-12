@@ -2,34 +2,33 @@
 
 ## 1. 工程用途
 
-本工程运行在 **STM32H750XBH6** 上。FPGA 对被测电路（DUT）的输入电压 `Ui` 和输出电压 `Uo` 做 FFT，每个频点通过 SPI1 发送一帧 16 字节数据。STM32 完成帧接收、解析、频响计算，并把结果显示在串口屏上。
+本工程运行在 **STM32H750XBH6** 上。FPGA 通过 SPI1 把每个测试频点的频率发给 STM32（临时协议，见第 4 节）。STM32 用两路 ADC 同时采集 DUT 的电压 `Ui` 和电流转换后的电压 `Uo`，在该频率上做单频 DFT，计算阻抗、导纳，并把结果显示在串口屏上。
 
 主要功能：
 
-- SPI1 从机 8 位接收，DMA 每次收一帧（16 字节），收完重新装载
+- SPI1 从机 8 位接收，DMA 每次收一帧（8 字节），收完重新装载
 - 硬件 CS（NSS，PA4）界定帧边界，EXTI 双边沿检测帧开始与结束
 - 帧头 `0x07 0x08`、帧尾 `0x00 0x00` 校验，短帧丢弃
-- 12 位有符号定点分量、13 位峰值 bin 序号解析
-- 记录队列，解析在 DMA 回调中完成，计算在主循环中完成
-- 传递函数 `H = Uo / Ui`
-- 跨阻前端下的阻抗 `Z = -R / H` 和导纳 `Y = -H / R`
-- 输入、输出幅值过小时丢弃该频点
+- 4 字节大端频率解析，记录队列在 DMA 回调中入队，计算在主循环中完成
+- ADC1、ADC2 各自单通道采样（PA0_C、PA1_C），共用 TIM6 触发，DMA 循环写入缓冲区
+- 每个频率开一个采样窗口，对两路做单频 DFT，得到 `Ui`、`Uo` 的复数分量
+- 传递函数 `H = Uo / Ui`，阻抗 `Z = -R / H`，导纳 `Y = -H / R`
+- 单频幅值过小时丢弃该频点
 - UART4 驱动串口屏，显示频率、阻抗和运行状态
-- ADC1、ADC2 各自单通道采样：PA0_C（DUT 电压）、PA1_C（电流转换电压），共用 TIM6 触发，DMA 循环写入缓冲区（见第 11 节）
 
 ## 2. 工程结构
 
 ```text
 9_30/
 ├─ USE/
-│  ├─ spi_receiver.h/.c   SPI1 帧接收、DMA、CS 边沿和数据解析
-│  ├─ circuit_id.h/.c     频响、阻抗和导纳计算
-│  ├─ screen.h/.c         串口屏 UART4 输出和错误上报
-│  └─ adc_sampler.h/.c    ADC1、ADC2 定时器触发采样（DMA）
+│  ├─ spi_receiver.h/.c   SPI1 帧接收、DMA、CS 边沿和频率解析
+│  ├─ adc_sampler.h/.c    ADC1、ADC2 采样、单频 DFT 窗口
+│  ├─ circuit_id.h/.c     H、Z、Y 计算
+│  └─ screen.h/.c         串口屏 UART4 输出和错误上报
 ├─ Core/
 │  ├─ Src/main.c          系统初始化和主循环（USER CODE 区）
 │  ├─ Src/spi.c           SPI1、DMA、PA4 和 EXTI4 配置（CubeMX 生成，部分在 USER CODE 区）
-│  ├─ Src/stm32h7xx_it.c  中断入口（EXTI4 由 CubeMX 生成）
+│  ├─ Src/stm32h7xx_it.c  中断入口（EXTI4 处理函数在 USER CODE 区）
 │  ├─ Src/usart.c         UART4 配置（CubeMX 生成）
 │  ├─ Src/adc.c           ADC1、ADC2 配置（CubeMX 生成，单通道、TIM6 触发）
 │  └─ Src/tim.c           TIM6 配置（CubeMX 生成，TRGO 触发 ADC）
@@ -42,7 +41,7 @@
 
 ## 3. 硬件模型
 
-前端使用跨阻放大器。运放反相端接近 0 V（虚地），DUT 的电流全部流过反馈电阻 `R`：
+DUT 接在 `Ui` 节点和虚地之间。运放反相端接近 0 V（虚地），DUT 的电流全部流过反馈电阻 `R`：
 
 ```text
 信号源 ── Ui ── DUT ──┬── 虚地（运放反相端）
@@ -60,27 +59,26 @@ H  = Uo / Ui = -Y × R
 
 由此可以从 `H` 反推 DUT 的导纳和阻抗。
 
-## 4. SPI 帧协议
+`Ui` 和 `Uo` 都是直接接入 ADC，中间没有放大或分压。两路 ADC 的增益误差和采样时刻偏差需要标定，见第 12 节。
 
-帧边界由 CS（低有效）决定，每帧固定 16 字节，多字节字段按大端顺序发送：
+## 4. SPI 帧协议（临时版本）
+
+FPGA 的正式协议尚未确定，下面是临时定义的 8 字节帧。帧头、帧尾与之前相同，中间改为频率。
+
+帧边界由 CS（低有效）决定，每帧固定 8 字节，多字节字段按大端顺序发送：
 
 ```text
 字节  内容
  0    0x07              帧头
  1    0x08              帧头
- 2-3  CH1 虚部          12 位有符号，高 4 位为 0 填充
- 4-5  CH1 实部          同上
- 6-7  CH0 虚部          同上
- 8-9  CH0 实部          同上
-10-11 index1            13 位无符号，高 3 位为 0 填充
-12-13 index0            13 位无符号，高 3 位为 0 填充
-14   0x00              帧尾
-15   0x00              帧尾
+ 2-5  频率              32 位无符号整数，单位 Hz，大端
+ 6    0x00              帧尾
+ 7    0x00              帧尾
 ```
 
-通道映射：**CH0 = Ui，CH1 = Uo**。
+频率允许范围为 1 Hz 到 500 kHz（ADC 采样率的一半）。超出范围或为 0 的帧被拒绝，报 E03。
 
-12 位分量取低 12 位，按第 11 位做符号扩展。`index` 为 FFT 峰值 bin，有效范围 0 – 512（实信号 FFT 的单边频谱），超出范围的帧被拒绝。
+旧的 16 字节数据帧（定点分量和峰值 bin）已注释保留在 [USE/spi_receiver.h](USE/spi_receiver.h) 和 [USE/spi_receiver.c](USE/spi_receiver.c) 中，待 FPGA 新协议确定后再删除或恢复。
 
 SPI 配置：
 
@@ -89,7 +87,7 @@ SPI 配置：
 - NSS：硬件输入（PA4），CS 低有效
 - 内核时钟：PLL2 的 75 MHz（`RCC_SPI123CLKSOURCE_PLL2`）。SCK 由 FPGA 提供，内核时钟不决定传输速率。
 - 从机能稳定接收的 SCK 上限需用示波器实测确认。ST 社区有 H7 从机在 22.8 MHz 以上出错的报告，参见 [ST 社区讨论](https://community.st.com/t5/stm32-mcus-products/stm32h7-slave-mode-timing-issue-above-22-8-mhz/td-p/822487)。
-- DMA：`DMA1_Stream0`，SPI1 RX，普通模式，长度 16 字节，每帧后重新装载
+- DMA：`DMA1_Stream0`，SPI1 RX，普通模式，长度 8 字节，每帧后重新装载
 
 引脚：
 
@@ -102,55 +100,81 @@ SPI 配置：
 
 接收流程：
 
-1. DMA 装载后等待一帧 16 字节。
+1. DMA 装载后等待一帧 8 字节。
 2. CS 下降沿（帧开始）：若 DMA 未就绪，本帧必丢，报 E02 并重新装载。
-3. CS 上升沿（帧结束）：若 DMA 计数不为 0，说明未收满 16 字节（短帧），abort 并报 E03，重新装载。计数为 0 时交给完成回调处理。
-4. 收满 16 字节后检查帧头、帧尾和 `index` 范围，通过则放入记录队列（深度 4，满时丢弃最旧记录）。
+3. CS 上升沿（帧结束）：若 DMA 计数不为 0，说明未收满 8 字节（短帧），abort 并报 E03，重新装载。计数为 0 时交给完成回调处理。
+4. 收满 8 字节后检查帧头、帧尾和频率范围，通过则放入频率记录队列（深度 4，满时丢弃最旧记录）。
 5. SPI 通信错误（溢出、模式错误等）由 `HAL_SPI_ErrorCallback` 处理：报 E03，abort 并重新装载。
 
-协议的宏定义集中在 [USE/spi_receiver.h](USE/spi_receiver.h)。若 FPGA 的标记值、字节序或字段定义变化，修改该文件即可。
+协议的宏定义集中在 [USE/spi_receiver.h](USE/spi_receiver.h)。
 
 当前协议没有序号或校验和，帧头帧尾只能校验固定字段，不能检测所有载荷错误。
 
 ## 5. 数据处理流程
 
 ```text
-FPGA ──SPI1/DMA/CS──> 一帧 16 字节
-                        │  帧头帧尾校验 + 字段解析
+FPGA ──SPI1/DMA/CS──> 一帧 8 字节（频率）
+                        │  帧头帧尾校验 + 频率解析
                         ▼
-                  记录队列（深度 4）
+                  频率记录队列（深度 4）
                         │  主循环中 SPI_Receiver_TryGetRecord()
                         ▼
-          CircuitID_Compute()   ── 计算 H、Z、Y，检查有效性
-                        │  有效结果
+          ADC_Sampler_SetFrequency()  ── 设定频率，开始新的采样窗口
+                        │
+                        │  DMA 中断中两路 ADC 累加单频 DFT
                         ▼
-          Screen_SetResult()    ── 保存最近一次有效结果
+          ADC_Sampler_GetWindow()     ── 窗口完成时取出 Ui、Uo 的复数分量
                         │
                         ▼
-          Screen_Poll()         ── 每 500 ms 通过 UART4 刷新串口屏
+          CircuitID_Compute()         ── 计算 H、Z、Y，检查有效性
+                        │  有效结果
+                        ▼
+          Screen_SetResult()          ── 保存最近一次有效结果
+                        │
+                        ▼
+          Screen_Poll()               ── 每 500 ms 通过 UART4 刷新串口屏
 ```
 
-主循环每次取出一条记录并调用计算函数。只有计算成功（返回 1）的结果才会更新显示。失败的记录被丢弃，错误码通过串口屏 `t4` 上报。
+主循环每次先处理队列中的频率，再取一次窗口结果。同一频率重复发送不会重启窗口。窗口完成后调用计算函数，成功（返回 1）才更新显示。
 
 ## 6. 计算方法
 
-输入是一条记录 `FPGA_Record_t`，输出是 `FRF_Point_t`。代码见 [USE/circuit_id.c](USE/circuit_id.c)。
+采样窗口和 DFT 在 [USE/adc_sampler.c](USE/adc_sampler.c) 中完成，H、Z、Y 在 [USE/circuit_id.c](USE/circuit_id.c) 中计算。
 
-### 6.1 输入检查
+### 6.1 采样窗口
 
-1. 配置检查：`R > 0`，否则报 E07。
-2. 频点检查：
-   - `index0 != index1`：两通道峰值不在同一频点，丢弃并报 E17。
-   - `index0 > 512`：超出实信号 FFT 单边频谱，丢弃并报 E03。
-   - `index0 == 0`：零频点，报 E07。
-3. 定点还原：分量乘 `CIR_FFT_SCALE` 得到电压，结果必须有限，否则报 E08。
-4. 幅值检查：
-   - `|Ui|² > CIR_INPUT_MIN_MAG²`，否则报 E09（`Ui` 太小，比值会被噪声放大）
-   - `|Uo|² > CIR_OUTPUT_MIN_MAG²`，否则报 E10（输出几乎没有信号）
+每个频率 `f` 对应一个窗口，窗口长度为：
 
-### 6.2 传递函数 H = Uo / Ui
+```text
+N = round(10 × fs / f)，限制在 [1024, 1000000] 之间
+fs = 1 MHz（TIM6 触发频率）
+```
 
-分子分母同乘 `conj(Ui)`，分母变为实数 `|Ui|²`，避免复数除法：
+窗口约覆盖 10 个信号周期。低频时 `N` 会被上限截断，窗口不再是整数周期，会有泄漏误差。最短窗口为 1024 点，约 1 ms。
+
+### 6.2 单频 DFT
+
+两路 ADC 在同一个 DMA 块边界开始累加，窗口起点相同，因此样本严格对齐。对每一路：
+
+```text
+ω = 2π f / fs
+S = Σ (x_n − x̄) · e^{−j ω n}，n = 0 … N−1
+x̄ 为窗口内的平均值（去除直流）
+```
+
+`S_i` 对应 `Ui`（ADC1），`S_o` 对应 `Uo`（ADC2）。
+
+单频幅值换算为 ADC 码值：
+
+```text
+|U| = 2 |S| / N
+```
+
+`|U|` 低于 `CIR_INPUT_MIN_AMP` 报 E09，低于 `CIR_OUTPUT_MIN_AMP` 报 E10。两个门限都是占位值，待实测确定。
+
+### 6.3 传递函数 H = Uo / Ui
+
+分子分母同乘 `conj(Ui)`，分母变为实数 `|Ui|²`：
 
 ```text
 |Ui|²  = Ui_re² + Ui_im²
@@ -158,6 +182,8 @@ H_re   = (Uo_re·Ui_re + Uo_im·Ui_im) / |Ui|²
 H_im   = (Uo_im·Ui_re − Uo_re·Ui_im) / |Ui|²
 |H|²   = H_re² + H_im²
 ```
+
+两路的窗口长度相同，`H` 与 DFT 的归一化无关，`H` 是无量纲的比值。
 
 `H` 的幅值和相位：
 
@@ -169,17 +195,11 @@ H_im   = (Uo_im·Ui_re − Uo_re·Ui_im) / |Ui|²
 
 `H` 的结果若不是有限数，报 E11。
 
-### 6.3 频率换算
+### 6.4 频率
 
-帧中只给峰值 bin，频率按下式换算：
+频率直接使用 SPI 帧中的值，不再由 FFT 峰值换算。
 
-```text
-f = bin × CIR_SAMPLE_RATE_HZ / CIR_FFT_POINTS
-```
-
-`CIR_SAMPLE_RATE_HZ` 按 FPGA `adc0_clk = clk_40m` 推断为 40 MSPS，**待硬件实测确认**。
-
-### 6.4 阻抗 Z 和导纳 Y（`CIR_DUT_TOPOLOGY = 1` 时计算）
+### 6.5 阻抗 Z 和导纳 Y（`CIR_DUT_TOPOLOGY = 1` 时计算）
 
 阻抗：
 
@@ -207,11 +227,13 @@ Y 相位 = atan2(Y_im, Y_re) × 180 / π
 
 Z 或 Y 的任一结果非有限，报 E14 并丢弃。
 
-### 6.5 输出
+`|Z|` 只依赖 `|H|` 和 `R`，不需要 ADC 的参考电压。但 `|H|` 的绝对值会受两路增益差影响，见第 12 节。
+
+### 6.6 输出
 
 | 字段 | 含义 | 单位 |
 |---|---|---|
-| `frequency_hz` | 频率 | Hz |
+| `frequency_hz` | 频率（来自 SPI） | Hz |
 | `h_magnitude_dB` / `h_phase_deg` | 传递函数增益和相位 | dB / ° |
 | `z_mag_ohm` / `z_phase_deg` | 阻抗幅值和相位 | Ω / ° |
 | `z_mag_dB` | 阻抗幅值 dB | dB |
@@ -222,7 +244,7 @@ Z 或 Y 的任一结果非有限，报 E14 并丢弃。
 
 串口屏只显示频率、`|Z|` 和 `Z` 相位。
 
-### 6.6 数值示例
+### 6.7 数值示例
 
 以 1 µF 电容为 DUT，`R = 1000 Ω`，`f = 1 kHz`：
 
@@ -237,21 +259,20 @@ Z 相位 = -90°
 
 ## 7. 参数配置
 
-主要参数位于 [USE/circuit_id.h](USE/circuit_id.h)：
-
-| 宏 | 默认值 | 说明 |
-|---|---|---|
-| `CIR_SAMPLE_RATE_HZ` | 4e7 | 采样率（fs），待硬件确认 |
-| `CIR_FFT_POINTS` | 1024 | FFT 点数 |
-| `CIR_FFT_SCALE` | 1.0 | 12 位定点到电压的比例，待 FPGA 缩放校准 |
-| `CIR_DUT_TOPOLOGY` | 1 | 1：计算 Z 和 Y；0：只计算 H |
-| `CIR_FEEDBACK_RESISTOR_OHM` | 1000.0 | 反馈电阻 R |
-| `CIR_INPUT_MIN_MAG` | 1.0 | `|Ui|` 下限（1 LSB，见下方说明） |
-| `CIR_OUTPUT_MIN_MAG` | 1.0 | `|Uo|` 下限（1 LSB，见下方说明） |
-| `CIR_H_MIN_MAG` | 1e-6 | `|H|` 下限，低于此值 Z 不可靠 |
-
-算 H 时两路同缩放会约掉，`CIR_FFT_SCALE` 不影响 H；算 `|Z|` 绝对值时必须已知该比例。幅值门限需要根据 FPGA 的 FFT 缩放方式和实际噪声水平校准。
-当前 `CIR_INPUT_MIN_MAG` / `CIR_OUTPUT_MIN_MAG` 取 1.0（1 LSB）：12 位定点下 `|U|2` 是非负整数，任何小于 1 的门限都只能拒绝恰好为零的频点，等价于“非零”判断。FPGA 缩放标定后应把 `CIR_FFT_SCALE` 与这两个门限一并改为物理电压值。
+| 宏 | 所在文件 | 默认值 | 说明 |
+|---|---|---|---|
+| `ADC_SAMPLER_RATE_HZ` | `adc_sampler.h` | 1e6 | ADC 采样率（TIM6 触发频率） |
+| `ADC_SAMPLER_PAIRS_PER_HALF` | `adc_sampler.h` | 64 | 每个 DMA 块的采样点数 |
+| `ADC_SAMPLER_WINDOW_CYCLES` | `adc_sampler.h` | 10 | 每个窗口覆盖的信号周期数 |
+| `ADC_SAMPLER_WINDOW_MIN` | `adc_sampler.h` | 1024 | 窗口最短采样点数 |
+| `ADC_SAMPLER_WINDOW_MAX` | `adc_sampler.h` | 1000000 | 窗口最长采样点数 |
+| `SPI_FRAME_FREQ_MAX_HZ` | `spi_receiver.h` | 500000 | 允许的最高频率（采样率的一半） |
+| `CIR_DUT_TOPOLOGY` | `circuit_id.h` | 1 | 1：计算 Z 和 Y；0：只计算 H |
+| `CIR_FEEDBACK_RESISTOR_OHM` | `circuit_id.h` | 1000.0 | 反馈电阻 R 的标称值，实际值需标定 |
+| `CIR_INPUT_MIN_AMP` | `circuit_id.h` | 4.0 | `|Ui|` 幅值下限（码值），占位，待实测 |
+| `CIR_OUTPUT_MIN_AMP` | `circuit_id.h` | 4.0 | `|Uo|` 幅值下限（码值），占位，待实测 |
+| `CIR_H_MIN_MAG` | `circuit_id.h` | 1e-6 | `|H|` 下限，低于此值 Z 不可靠 |
+| `ADC_SAMPLER_VREF_V` | `adc_sampler.h` | 3.3 | 参考电压，当前计算中未使用，留作后续换算 |
 
 CS 引脚在 [USE/spi_receiver.h](USE/spi_receiver.h) 中由 `SPI_CS_GPIO_PORT`、`SPI_CS_PIN` 定义。更换引脚时，需同时修改这两个宏、`.ioc` 中的 PA4 配置，以及 `spi.c` 中的 GPIO 与 EXTI 配置。
 
@@ -276,17 +297,17 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以
 | 控件 | 内容 | 示例 | 含义 |
 |---|---|---|---|
 | `t0` | `cs:N` | `cs:120` | CS 下降沿次数，即开始接收的帧数 |
-| `t1` | `full:N` | `full:120` | 收满 16 字节的次数 |
+| `t1` | `full:N` | `full:120` | 收满一帧（8 字节）的次数 |
 | `t2` | `hdr:N` | `hdr:118` | 帧头帧尾校验通过的次数 |
 | `t3` | `beat:N` | `beat:1234` | 心跳，同正常模式 |
-| `t4` | `raw:` 加十六进制 | `raw:0708…0000` | 最近一次收满的 16 字节原始帧 |
+| `t4` | `raw:` 加十六进制 | `raw:0708…0000` | 最近一次收满的 8 字节原始帧 |
 
 判读方法：
 
 - **`cs` 不增加**：接线、PA4 NSS 或 FPGA 的 `spi_cs` 没有工作。
-- **`cs` 增加，`full` 为 0 或远小于 `cs`**：收不满 16 字节，即短帧（E03）。按 FPGA 代码推断，实际只发 15 字节，与此吻合。
+- **`cs` 增加，`full` 为 0 或远小于 `cs`**：收不满 8 字节，即短帧（E03）。
 - **`full` 增加，`hdr` 为 0**：帧头或帧尾不对，查看 `t4` 中的原始字节。
-- **`hdr` 增加且接近 `full`**：通信和帧格式正常，可以切回 `SCREEN_SPI_TEST = 0` 测频响。
+- **`hdr` 增加且接近 `full`**：通信和帧格式正常，可以切回 `SCREEN_SPI_TEST = 0` 查看频响结果。
 
 测试模式下 `t4` 显示原始帧，不显示错误码。错误仍然计数，但屏幕上看不到。需要查看错误时，切回正常模式。
 
@@ -306,58 +327,35 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以
 
 | 码 | 名称 | 位置 | 触发条件 | 类型 |
 |---|---|---|---|---|
-| E01 | HAL_INIT | CubeMX 生成的 `MX_*_Init()` | 外设初始化失败（无法区分具体外设） | 致命 |
+| E01 | HAL_INIT | CubeMX 生成的 `MX_*_Init()`，`ADC_Sampler_Init()` | 外设初始化或 ADC 校准、DMA 启动失败 | 致命 |
 | E02 | SPI_DMA | `main.c` / `spi_receiver.c` | DMA 启动失败；CS 下降沿时 DMA 未就绪 | 致命 / 非致命 |
-| E03 | SPI_FRAME | `spi_receiver.c` / `circuit_id.c` | 帧头帧尾错、短帧、`index > 512`、SPI 通信错误 | 非致命 |
-| E04 | SPI_NAN | — | 已弃用（定点帧无浮点），保留编号 | — |
-| E05 | SPI_LEN | — | 已弃用（不再解析 float），保留编号 | — |
-| E06 | SPI_QFULL | `spi_receiver.c` | 记录队列满，丢弃最旧数据 | 非致命 |
-| E07 | CIR_CFG | `circuit_id.c` | `R ≤ 0` 或 `bin = 0` | 非致命 |
-| E08 | CIR_NAN_IN | `circuit_id.c` | 输入（含比例换算后）非有限 | 非致命 |
-| E09 | CIR_UI_LOW | `circuit_id.c` | `\|Ui\|` 过小 | 非致命 |
-| E10 | CIR_UO_LOW | `circuit_id.c` | `\|Uo\|` 过小 | 非致命 |
+| E03 | SPI_FRAME | `spi_receiver.c` | 帧头帧尾错、短帧、频率为 0 或超过 500 kHz、SPI 通信错误 | 非致命 |
+| E04 | SPI_NAN | — | 已弃用，保留编号 | — |
+| E05 | SPI_LEN | — | 已弃用，保留编号 | — |
+| E06 | SPI_QFULL | `spi_receiver.c` | 频率记录队列满，丢弃最旧数据 | 非致命 |
+| E07 | CIR_CFG | `circuit_id.c` | `R ≤ 0`、频率为 0 或窗口为空 | 非致命 |
+| E08 | CIR_NAN_IN | `circuit_id.c` | 窗口的 Ui、Uo 分量非有限 | 非致命 |
+| E09 | CIR_UI_LOW | `circuit_id.c` | `\|Ui\|` 幅值低于 `CIR_INPUT_MIN_AMP` | 非致命 |
+| E10 | CIR_UO_LOW | `circuit_id.c` | `\|Uo\|` 幅值低于 `CIR_OUTPUT_MIN_AMP` | 非致命 |
 | E11 | CIR_H_NAN | `circuit_id.c` | H 非有限 | 非致命 |
 | E12 | CIR_OUT_NAN | `circuit_id.c` | 频率、dB、相位输出非有限 | 非致命 |
 | E13 | CIR_H_LOW | `circuit_id.c` | `\|H\|` 过小，无法计算 Z | 非致命 |
 | E14 | CIR_ZY_NAN | `circuit_id.c` | Z 或 Y 非有限 | 非致命 |
 | E15 | UART_TX | `screen.c` | `HAL_UART_Transmit_IT()` 返回非 OK | 非致命 |
 | E16 | UART_BUSY | `screen.c` | 上一条指令未发完，本周期跳过 | 非致命 |
-| E17 | BIN_MISMATCH | `circuit_id.c` | 两通道峰值 bin 不一致（`index0 != index1`） | 非致命 |
+| E17 | BIN_MISMATCH | — | 已弃用（旧的峰值 bin 协议），保留编号 | — |
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
 ## 9. 已知限制
 
-- **两路峰值 bin 不一致的帧被丢弃（E17）。** 详见 9.1 节。
-- **FPGA 配置字与 FFT IP 的定义可能不一致。** 按 `xfft_0` 的 testbench，CH1 的正/逆变换标志位应在配置字 bit 1，而 `axis_config.v` 拼接时将其放在 bit 11。这会影响 CH1 的频谱，由 FPGA 侧处理，MCU 无法检测。
-- **FPGA 实际发送字节数待确认。** 按 `data_stute.v` 的状态机推断，第 15 字节可能不会发出。需要用逻辑分析仪确认实际帧长。
-
-### 9.1 两路峰值 bin 不一致（E17）
-
-**现象。** 每帧的 `index0`（CH0，即 Ui 的峰值 bin）和 `index1`（CH1，即 Uo 的峰值 bin）可能不同。`index0 != index1` 时，`CircuitID_Compute()` 丢弃该帧并报 E17。
-
-**为什么需要两路 FFT。** `H = Uo / Ui` 必须在同一频率上相除。只有同一频点的 Ui 和 Uo 才能得到 DUT 的幅值和相位。
-
-**为什么会不一致。** FPGA 的 `xfft_0` 是双通道 FFT，两路在同一次变换中输出同一个 bin 网格，因此 bin 号本身是对齐的。不一致来自 FPGA 的峰值选择逻辑（[axi4s_slave.v](C:/Users/k1350/Desktop/opjjg/dac_staute/dac_staute.srcs/sources_1/new/axi4s_slave.v)）：
-
-- `power_fft0` 和 `power_fft1` 各自与各自的历史最大值比较，各自决定 `index0`、`index1`。
-- `fft0_max` 和 `fft1_max` 只在复位时清零，帧与帧之间不清。因此 `index` 只会在超过历史全局最大值的 bin 上更新，很可能卡在早期的峰值上。
-- 噪声下或 DUT 在激励频率处衰减很大时（如陷波、高阻抗），Uo 的峰值会落到其他 bin，两路 bin 随之分开。这种情况恰好是最有价值的频点，**因此可能被丢弃得最多**。这一点是根据电路原理推断的，尚未用硬件数据验证。
-
-**MCU 端为什么不能补救。** 每帧只带各通道自己峰值处的复数值。`index0` 处的 CH1 值不在帧中，MCU 无法凭当前帧构造同一频点的 H。
-
-**当前处理（决策 A）。** 两路 bin 不一致的帧直接丢弃并报 E17，不会算出错频点的 H。代价是丢帧数量未知。
-
-**如何验证。** E17 的累计次数显示在 `t4` 上（格式 `E17 BIN_MISMATCH xN`）。在硬件上扫频时观察 E17 的增长速度与有效结果数，即可判断丢帧比例。
-
-**后续方案（需要 FPGA 修改，MCU 侧无法单独完成）。**
-
-| 方案 | 做法 | 结果 |
-|---|---|---|
-| B | 以 `index0` 为频率，FPGA 同时输出 CH1 在 `index0` 处的值 | 不需要峰值相等，但 FPGA 要增加取值通路 |
-| C | FPGA 逐 bin 输出，每帧 `index0 = index1 = k`，峰值搜索删除 | 每个频点都有完整 H，频响曲线最完整；SPI 传输量增加，需确认 MCU 能跟上 |
-
-若 E17 占比过高，建议转向方案 C。方案 C 需要先修复 FPGA 的 FFT 配置字位序（见上方“已知限制”），否则两路频谱本身不可信。
+- **窗口泄漏。** 窗口长度按 10 个周期计算，但不是整数周期，尤其在低频（窗口被上限截断）时，单频 DFT 会有泄漏误差。
+- **两路增益和采样时刻未标定。** 两路 ADC 的增益误差和两个独立 ADC 之间的采样时刻偏差会直接进入 `H`。见第 12 节。
+- **两个 ADC 不是硬件同步模式。** 它们由同一个 TIM6 TRGO 触发，采样时刻接近，但有几百纳秒的偏差。频率越高，相位误差越大。
+- **频率帧节奏。** 新频率会重启窗口，窗口至少需要 1 ms。如果 FPGA 在窗口完成前就发下一个不同频率，将得不到结果。需要 FPGA 每个频点至少停留约 10 ms（对低频更长）。
+- **幅值门限是占位值。** `CIR_INPUT_MIN_AMP`、`CIR_OUTPUT_MIN_AMP` 为 4 个码值，需要用实际噪声水平确定。
+- **FPGA 正式协议未定。** 当前 8 字节帧是临时定义，频率字段的字节序和范围需要和 FPGA 确认。
+- **屏幕默认为通信测试模式。** `SCREEN_SPI_TEST = 1` 时屏幕不显示频响结果，需要切换为 0。
 
 ## 10. 编译与维护
 
@@ -367,47 +365,96 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以
 - STM32H7 HAL FW 1.13
 - ARMCC V5
 - 系统时钟 480 MHz，HCLK 120 MHz，APB 60 MHz
+- SPI1 内核时钟 75 MHz（PLL2），ADC 时钟 37.5 MHz（PLL2 经 /2）
 
 重新生成 CubeMX 代码后，请检查：
 
-1. Keil 工程中仍包含 `USE/spi_receiver.c`、`USE/circuit_id.c`、`USE/screen.c`。
+1. Keil 工程中仍包含 `USE/spi_receiver.c`、`USE/adc_sampler.c`、`USE/circuit_id.c`、`USE/screen.c`。
 2. 头文件路径仍包含 `../USE`。
-3. SPI1 数据宽度仍为 8 bit，NSS 为硬件输入，DMA 为普通模式（长度 16 字节）。
+3. SPI1 数据宽度仍为 8 bit，NSS 为硬件输入，DMA 为普通模式（长度 8 字节）。
 4. `spi.c` 的 MspInit USER CODE 区仍包含 PA4 的 GPIO 配置和 EXTI4 双边沿配置。
-5. `stm32h7xx_it.c` 中仍有 `EXTI4_IRQHandler`，且 `.ioc` 中 `NVIC.EXTI4_IRQn` 已启用。
-6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`SPI_Receiver_Init()`、`CircuitID_Init()` 和 `Screen_Poll()`。
+5. `stm32h7xx_it.c` 的 USER CODE 区仍有 `EXTI4_IRQHandler`。`.ioc` 中不需要 `NVIC.EXTI4_IRQn`，EXTI4 的使能由 `spi.c` 负责。
+6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`SPI_Receiver_Init()`、`ADC_Sampler_Init()`、`CircuitID_Init()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
-8. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`；`.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、由 TIM6 TRGO 触发。
+8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发，ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`。
+9. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`。
 
 ## 11. ADC 采样
 
-ADC1、ADC2 各自对一路电压做周期性采样，由同一个 TIM6 触发，结果写入各自的 DMA 缓冲区，目前只保留最近一对数据。采样结果尚未接入频响计算。代码见 [USE/adc_sampler.c](USE/adc_sampler.c)。
+ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触发，DMA 循环写入各自的缓冲区。采样结果不再直接显示，而是用于窗口 DFT。代码见 [USE/adc_sampler.c](USE/adc_sampler.c)。
 
 ### 11.1 通道与引脚
 
 | 通道 | 引脚 | ADC 通道 | 含义 |
 |---|---|---|---|
-| ADC1 | PA0_C | `ADC_CHANNEL_0`（ADC1_INP0） | DUT 电压 |
-| ADC2 | PA1_C | `ADC_CHANNEL_1`（ADC2_INP1） | 电流转换后的电压 |
+| ADC1 | PA0_C | `ADC_CHANNEL_0`（ADC1_INP0） | DUT 电压 `Ui` |
+| ADC2 | PA1_C | `ADC_CHANNEL_1`（ADC2_INP1） | 电流转换后的电压 `Uo` |
 
-`_C` 为直连快速通道，经 SYSCFG 模拟开关接入 ADC。引脚配置为模拟模式，无上下拉。`PA0_C` 与普通 `PA0` 是同一个物理引脚，同一时刻只能选其中一条路径。
+`_C` 为直连快速通道，经 SYSCFG 模拟开关接入 ADC。引脚配置为模拟模式，无上下拉。模拟开关为 `OPEN`，ADC 从 `_C` 焊盘采样。`PA0_C` 与普通 `PA0` 是两个焊盘，中间靠模拟开关连接，同一时刻只能选其中一条路径。
 
 ### 11.2 采样时序
 
-- 由 TIM6 TRGO（上升沿）触发 ADC。定时器 PSC=11、ARR=9，按 120 MHz 计数时钟计算，触发周期为 1 µs（1 MHz）。
-- 关闭连续转换，每次触发完成一次单通道转换。两路 ADC 由同一个 TIM6 TRGO 触发，采样时刻接近，但不是硬件同步模式。采样时间为 1.5 个 ADC 周期。ADC 时钟由 PLL2 的 75 MHz 经 /2 分频为 37.5 MHz，低于 16 位 ADC 的时钟上限（50 MHz）。ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准，再启动 DMA。
-- DMA1_Stream1 循环模式，半字（16 位）对齐。每填满半个缓冲区，回调保存该半区最后一对采样。
+- 由 TIM6 TRGO（上升沿）触发两路 ADC。定时器 PSC=11、ARR=9，按 120 MHz 计数时钟计算，采样速率为 1 MHz。
+- 关闭连续转换，每次触发完成一次单通道转换。采样时间为 1.5 个 ADC 周期。
+- ADC 时钟由 PLL2 的 75 MHz 经 /2 分频为 37.5 MHz，低于 16 位 ADC 的时钟上限（50 MHz）。
+- ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准，两路都校准，再启动 DMA，最后启动 TIM6。
+- DMA 循环模式，半字（16 位）对齐。每个 DMA 块（半个缓冲区，64 点）回调一次，两路各自计数块序号。
 
-### 11.3 接口
+### 11.3 窗口与对齐
+
+- `ADC_Sampler_SetFrequency(f)` 设定频率，并从两路共同的块序号开始新窗口。两路块序号取较大者，保证起点相同。
+- 每路在 DMA 回调中累加窗口内的样本，两路累加到相同点数后，窗口完成。
+- `ADC_Sampler_GetWindow()` 取出完成的窗口，主循环交给 `CircuitID_Compute()`。
+- 同一频率重复调用 `SetFrequency` 不会重启窗口。
+
+### 11.4 接口
 
 | 函数 / 类型 | 说明 |
 |---|---|
-| `uint8_t ADC_Sampler_Init(void)` | 校准并启动 ADC1、ADC2 的 DMA，再启动 TIM6，成功返回 1。`main.c` 中调用，失败报 E01 |
-| `uint8_t ADC_Sampler_GetLatest(ADC_Sample_t *out)` | 取最近一对采样，尚无数据时返回 0 |
-| `ADC_Sample_t` | `dut_voltage_raw`、`current_voltage_raw`：16 位原始码值；`sequence`：每完成一个半区加 1，0 表示无数据 |
+| `uint8_t ADC_Sampler_Init(void)` | 校准并启动两路 DMA，再启动 TIM6。`main.c` 中调用，失败报 E01 |
+| `uint8_t ADC_Sampler_SetFrequency(uint32_t)` | 设定频率并开始新窗口。频率非法返回 0 |
+| `uint8_t ADC_Sampler_GetWindow(ADC_Window_t *)` | 取出最近完成的窗口，没有新窗口时返回 0 |
+| `ADC_Window_t` | `frequency_hz`、`sample_count`，以及 `ui_re`、`ui_im`、`uo_re`、`uo_im`（单频 DFT 的复数分量） |
 
-### 11.4 待确认
+### 11.5 待确认
 
-- 码值到电压的换算参数为 16 位满量程 65535、参考电压 3.3 V（`ADC_SAMPLER_VREF_V`），目前未接入显示或计算，实际 VREF 与量程待实测确认。
 - 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
-- 1 MHz 为初始采样速率。需要其他速率时，修改 TIM6 的 PSC 和 ARR 即可。
+- 采样速率 1 MHz 是初始值。需要其他速率时，修改 TIM6 的 PSC 和 ARR，并同步修改 `ADC_SAMPLER_RATE_HZ`。
+- 窗口长度的 10 周期和上下限是初始值，需要结合实测调整。
+
+## 12. 标定方法
+
+本工程的两路 ADC 直接测量 `Ui` 和 `Uo`，没有放大或分压。误差主要来自以下几个方面：
+
+1. **两路 ADC 的增益不同。** HAL 的校准只修正偏移和线性度，不修正增益。16 位 ADC 的增益误差常见为 0.1% 到 0.5%，会让 `|H|` 有固定偏差。
+2. **两路的输入路径不同。** PA0_C 和 PA1_C 的模拟开关、寄生电容和源阻抗不同，对高频信号的带宽也不同，会引起相位偏差。
+3. **两路的采样时刻有偏差。** 两个 ADC 由同一个 TIM6 触发，但不是硬件同步模式，时刻差约为几百纳秒。频率越高，这个偏差造成的相位误差越大。例如 100 kHz 时，0.27 µs 的偏差约为 10°。这一项通常比增益误差更重要。
+4. **反馈电阻 `R` 的实际值。** 代码中的 1000 Ω 是标称值，电阻有公差，`|Z|` 和 `|Y|` 的绝对值会直接跟着偏。
+
+### 12.1 直通测试（标定两路的增益比和相位差）
+
+把 `Ui` 和 `Uo` 的 DUT 连接点短接到同一个信号源上。理论上两路测到的是同一个信号，`H = 1`，即 0 dB、0°。
+
+1. 对每个标定频率 `f_k`，记录程序算出的 `H_thru(f_k)`（即 `h_magnitude_dB` 和 `h_phase_deg`，或复数形式）。
+2. `H_thru(f_k)` 与理论值 1 的偏差，就是两路的增益比和相位差。
+3. 对于测量的任意频点 `f`，修正后的传递函数为：
+
+```text
+H_true(f) = H_meas(f) / H_thru(f)
+```
+
+`H_thru(f)` 需要按频率存成表，中间频率用插值。
+
+### 12.2 反馈电阻 R 的标定
+
+用一个已知阻抗的器件（如精密电阻或电容）代替 DUT，测量 `|Z|`，与器件的标称值比较。若两者不一致，就可以反算出实际的 `R`，并更新 `CIR_FEEDBACK_RESISTOR_OHM`。
+
+### 12.3 标定数据的使用
+
+- 直通测试的结果应保存为按频率的表格，`CircuitID_Compute()` 在计算 `H` 之后乘上修正系数。
+- 标定时的采样参数（窗口长度、频率点、采样速率）必须与实际测量时一致，否则标定结果不适用。
+- 目前代码中**尚未实现**这一修正。在完成标定之前，`|Z|` 的绝对值不可信，`Z` 的相位在两路时刻偏差较小时基本可信。
+
+### 12.4 时刻偏差的根本解决
+
+如果第 3 点的时刻偏差对结果影响太大，需要改为 ADC 双重同步模式（ADC1 为主、ADC2 为从），让两路在同一个采样时刻开始转换。这需要修改 `.ioc` 的多模式设置，并调整 `adc_sampler.c` 的 DMA 处理。

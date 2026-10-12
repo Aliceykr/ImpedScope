@@ -8,7 +8,7 @@
 static uint8_t s_rx_buffer[SPI_FRAME_TOTAL_BYTES];
 
 /* 单生产者（DMA/EXTI 回调）、单消费者（主循环）记录队列。 */
-static FPGA_Record_t s_queue[SPI_RECORD_QUEUE_SIZE];
+static FREQ_Record_t s_queue[SPI_RECORD_QUEUE_SIZE];
 static volatile uint8_t s_queue_head;
 static volatile uint8_t s_queue_tail;
 
@@ -25,9 +25,13 @@ static volatile uint32_t s_frame_ok_count;
 static uint8_t s_last_frame[SPI_FRAME_TOTAL_BYTES];
 
 static uint8_t SPI_Receiver_Arm(void);
-static void    SPI_Receiver_Enqueue(const FPGA_Record_t *record);
-static int16_t SPI_Receiver_ParseSample(const uint8_t *raw, uint16_t offset);
+static void    SPI_Receiver_Enqueue(const FREQ_Record_t *record);
+
+#if 0
+/* 旧数据帧解析，暂时注释，待新协议确定。 */
+static int16_t  SPI_Receiver_ParseSample(const uint8_t *raw, uint16_t offset);
 static uint16_t SPI_Receiver_ParseIndex(const uint8_t *raw, uint16_t offset);
+#endif
 
 uint8_t SPI_Receiver_Init(void)
 {
@@ -42,7 +46,9 @@ uint8_t SPI_Receiver_Init(void)
     return SPI_Receiver_Arm();
 }
 
-uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FPGA_Record_t *out)
+#if 0
+/* 旧数据帧解析（定点分量与峰值 bin），暂时注释。 */
+uint8_t SPI_Receiver_ParseFrame_OldDataFrame(const uint8_t *raw, FPGA_Record_t *out)
 {
     if ((raw == (const uint8_t *)0) || (out == (FPGA_Record_t *)0))
     {
@@ -98,6 +104,43 @@ static uint16_t SPI_Receiver_ParseIndex(const uint8_t *raw, uint16_t offset)
                                 raw[offset + 1u]);
     return (uint16_t)(word & ((1u << SPI_FRAME_INDEX_BITS) - 1u));
 }
+#endif
+
+/* 解析一帧：帧头、帧尾校验通过后，读取 4 字节大端频率并检查范围。 */
+uint8_t SPI_Receiver_ParseFrame(const uint8_t *raw, FREQ_Record_t *out)
+{
+    uint32_t frequency;
+
+    if ((raw == (const uint8_t *)0) || (out == (FREQ_Record_t *)0))
+    {
+        return 0u;
+    }
+    (void)memset(out, 0, sizeof(*out));
+
+    if ((raw[0u] != SPI_FRAME_HEADER_0) ||
+        (raw[1u] != SPI_FRAME_HEADER_1) ||
+        (raw[SPI_FRAME_TAIL_OFFSET] != SPI_FRAME_TAIL_0) ||
+        (raw[SPI_FRAME_TAIL_OFFSET + 1u] != SPI_FRAME_TAIL_1))
+    {
+        Screen_ReportError(SCREEN_E03_SPI_FRAME);
+        return 0u;
+    }
+    s_frame_ok_count++;
+
+    frequency = ((uint32_t)raw[SPI_FRAME_FREQ_OFFSET]      << 24) |
+                ((uint32_t)raw[SPI_FRAME_FREQ_OFFSET + 1u] << 16) |
+                ((uint32_t)raw[SPI_FRAME_FREQ_OFFSET + 2u] << 8) |
+                 (uint32_t)raw[SPI_FRAME_FREQ_OFFSET + 3u];
+
+    if ((frequency == 0u) || (frequency > SPI_FRAME_FREQ_MAX_HZ))
+    {
+        Screen_ReportError(SCREEN_E03_SPI_FRAME);
+        return 0u;
+    }
+
+    out->frequency_hz = frequency;
+    return 1u;
+}
 
 static uint8_t SPI_Receiver_Arm(void)
 {
@@ -110,7 +153,7 @@ static uint8_t SPI_Receiver_Arm(void)
     return 0u;
 }
 
-static void SPI_Receiver_Enqueue(const FPGA_Record_t *record)
+static void SPI_Receiver_Enqueue(const FREQ_Record_t *record)
 {
     uint8_t next_head = (uint8_t)((s_queue_head + 1u) % SPI_RECORD_QUEUE_SIZE);
 
@@ -124,12 +167,12 @@ static void SPI_Receiver_Enqueue(const FPGA_Record_t *record)
     s_queue_head = next_head;
 }
 
-uint8_t SPI_Receiver_TryGetRecord(FPGA_Record_t *out)
+uint8_t SPI_Receiver_TryGetRecord(FREQ_Record_t *out)
 {
     uint32_t interrupt_state;
     uint8_t tail;
 
-    if (out == (FPGA_Record_t *)0)
+    if (out == (FREQ_Record_t *)0)
     {
         return 0u;
     }
@@ -178,10 +221,10 @@ void SPI_Receiver_GetStats(SPI_Stats_t *out)
     }
 }
 
-/* 一帧 16 字节收满：解析、入队，然后重新装载 DMA。 */
+/* 一帧收满：解析、入队，然后重新装载 DMA。 */
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    FPGA_Record_t record;
+    FREQ_Record_t record;
 
     if ((hspi != (SPI_HandleTypeDef *)0) && (hspi->Instance == SPI1))
     {
@@ -220,9 +263,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
     if (HAL_GPIO_ReadPin(SPI_CS_GPIO_PORT, SPI_CS_PIN) == GPIO_PIN_SET)
     {
-        /* CS 上升（帧结束）。DMA 计数为 0 表示已收满 16 字节，完成回调
-         * 可能还在排队（DMA 中断优先级更高，但本回调可能先执行），交给
-         * RxCpltCallback 处理，这里不做任何动作。 */
+        /* CS 上升（帧结束）。DMA 计数为 0 表示已收满，完成回调可能还在排队，
+         * 交给 RxCpltCallback 处理，这里不做任何动作。 */
         if ((s_frame_active != 0u) &&
             (__HAL_DMA_GET_COUNTER(hspi1.hdmarx) != 0u))
         {
