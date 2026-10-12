@@ -18,8 +18,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "dma.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -28,6 +30,7 @@
 #include "spi_receiver.h"
 #include "circuit_id.h"
 #include "screen.h"
+#include "adc_sampler.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,6 +105,8 @@ int main(void)
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_UART4_Init();
+  MX_ADC1_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   Screen_Init();
   Screen_SetStage("PERIPH");
@@ -110,6 +115,10 @@ int main(void)
   if (SPI_Receiver_Init() == 0u)
   {
     Screen_Fatal(SCREEN_E02_SPI_DMA);
+  }
+  if (ADC_Sampler_Init() == 0u)
+  {
+    Screen_Fatal(SCREEN_E01_HAL_INIT);
   }
   Screen_SetStage("SPI");
   /* USER CODE END 2 */
