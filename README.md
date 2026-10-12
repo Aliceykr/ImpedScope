@@ -15,7 +15,7 @@
 - 跨阻前端下的阻抗 `Z = -R / H` 和导纳 `Y = -H / R`
 - 输入、输出幅值过小时丢弃该频点
 - UART4 驱动串口屏，显示频率、阻抗和运行状态
-- ADC1 双通道采样：PA0_C（DUT 电压）、PA1_C（电流转换电压），TIM6 触发，DMA 循环写入缓冲区，串口屏显示电压（见第 11 节）
+- ADC1、ADC2 各自单通道采样：PA0_C（DUT 电压）、PA1_C（电流转换电压），共用 TIM6 触发，DMA 循环写入缓冲区（见第 11 节）
 
 ## 2. 工程结构
 
@@ -25,13 +25,13 @@
 │  ├─ spi_receiver.h/.c   SPI1 帧接收、DMA、CS 边沿和数据解析
 │  ├─ circuit_id.h/.c     频响、阻抗和导纳计算
 │  ├─ screen.h/.c         串口屏 UART4 输出和错误上报
-│  └─ adc_sampler.h/.c    ADC1 双通道定时器触发采样（DMA）
+│  └─ adc_sampler.h/.c    ADC1、ADC2 定时器触发采样（DMA）
 ├─ Core/
 │  ├─ Src/main.c          系统初始化和主循环（USER CODE 区）
 │  ├─ Src/spi.c           SPI1、DMA、PA4 和 EXTI4 配置（CubeMX 生成，部分在 USER CODE 区）
 │  ├─ Src/stm32h7xx_it.c  中断入口（EXTI4 由 CubeMX 生成）
 │  ├─ Src/usart.c         UART4 配置（CubeMX 生成）
-│  ├─ Src/adc.c           ADC1 配置（CubeMX 生成，两路扫描、TIM6 触发）
+│  ├─ Src/adc.c           ADC1、ADC2 配置（CubeMX 生成，单通道、TIM6 触发）
 │  └─ Src/tim.c           TIM6 配置（CubeMX 生成，TRGO 触发 ADC）
 ├─ Drivers/               STM32 HAL 和 CMSIS
 ├─ MDK-ARM/               Keil 工程文件
@@ -87,6 +87,8 @@ SPI 配置：
 - FPGA：主机；STM32：SPI1 从机
 - 模式：Mode 0（CPOL=0，CPHA=0），MSB first，8 bit
 - NSS：硬件输入（PA4），CS 低有效
+- 内核时钟：PLL2 的 75 MHz（`RCC_SPI123CLKSOURCE_PLL2`）。SCK 由 FPGA 提供，内核时钟不决定传输速率。
+- 从机能稳定接收的 SCK 上限需用示波器实测确认。ST 社区有 H7 从机在 22.8 MHz 以上出错的报告，参见 [ST 社区讨论](https://community.st.com/t5/stm32-mcus-products/stm32h7-slave-mode-timing-issue-above-22-8-mhz/td-p/822487)。
 - DMA：`DMA1_Stream0`，SPI1 RX，普通模式，长度 16 字节，每帧后重新装载
 
 引脚：
@@ -125,7 +127,7 @@ FPGA ──SPI1/DMA/CS──> 一帧 16 字节
           Screen_SetResult()    ── 保存最近一次有效结果
                         │
                         ▼
-          Screen_Poll()         ── 每 100 ms 通过 UART4 刷新串口屏
+          Screen_Poll()         ── 每 500 ms 通过 UART4 刷新串口屏
 ```
 
 主循环每次取出一条记录并调用计算函数。只有计算成功（返回 1）的结果才会更新显示。失败的记录被丢弃，错误码通过串口屏 `t4` 上报。
@@ -255,7 +257,7 @@ CS 引脚在 [USE/spi_receiver.h](USE/spi_receiver.h) 中由 `SPI_CS_GPIO_PORT`�
 
 ## 8. 串口屏
 
-UART4，9600 8N1，PC10 TX / PC11 RX。每 100 ms 发送 5 条指令，每条以 `FF FF FF` 结尾。串口屏页面需要建立同名文本框 `t0`~`t4`。
+UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以 `FF FF FF` 结尾。串口屏页面需要建立同名文本框 `t0`~`t4`。
 
 | 控件 | 内容 | 示例 |
 |---|---|---|
@@ -269,21 +271,22 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 100 ms 发送 5 条指令，每条以
 
 ### 8.1 通信测试模式
 
-[USE/screen.h](USE/screen.h) 中 `SCREEN_SPI_TEST = 1` 时，串口屏 t0、t1 显示两路 ADC 电压，t2 显示 SPI 帧头校验计数，用于在没有有效频响数据时判断采样和通信是否正常。
+[USE/screen.h](USE/screen.h) 中 `SCREEN_SPI_TEST = 1` 时，串口屏显示 SPI 收包计数，用于在没有有效频响数据时判断通信是否正常。
 
 | 控件 | 内容 | 示例 | 含义 |
 |---|---|---|---|
-| `t0` | `dut:N.NNN` | `dut:1.234` | DUT 电压（V），无数据时为 `dut:-` |
-| `t1` | `cur:N.NNN` | `cur:0.567` | 电流转换电压（V），无数据时为 `cur:-` |
+| `t0` | `cs:N` | `cs:120` | CS 下降沿次数，即开始接收的帧数 |
+| `t1` | `full:N` | `full:120` | 收满 16 字节的次数 |
 | `t2` | `hdr:N` | `hdr:118` | 帧头帧尾校验通过的次数 |
 | `t3` | `beat:N` | `beat:1234` | 心跳，同正常模式 |
 | `t4` | `raw:` 加十六进制 | `raw:0708…0000` | 最近一次收满的 16 字节原始帧 |
 
 判读方法：
 
-- **`dut`、`cur` 显示 `-`**：ADC 尚未出数据，检查 `ADC_Sampler_Init()` 是否成功（E01），以及 TIM6 是否启动。
-- **`hdr` 不增加**：SPI 没有收到有效帧，或帧头帧尾不对。查看 `t4` 中的原始字节，并检查 PA4 NSS 与 FPGA 的 `spi_cs`。
-- **`hdr` 增加**：SPI 通信和帧格式正常，可以切回 `SCREEN_SPI_TEST = 0` 测频响。
+- **`cs` 不增加**：接线、PA4 NSS 或 FPGA 的 `spi_cs` 没有工作。
+- **`cs` 增加，`full` 为 0 或远小于 `cs`**：收不满 16 字节，即短帧（E03）。按 FPGA 代码推断，实际只发 15 字节，与此吻合。
+- **`full` 增加，`hdr` 为 0**：帧头或帧尾不对，查看 `t4` 中的原始字节。
+- **`hdr` 增加且接近 `full`**：通信和帧格式正常，可以切回 `SCREEN_SPI_TEST = 0` 测频响。
 
 测试模式下 `t4` 显示原始帧，不显示错误码。错误仍然计数，但屏幕上看不到。需要查看错误时，切回正常模式。
 
@@ -374,37 +377,37 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 100 ms 发送 5 条指令，每条以
 5. `stm32h7xx_it.c` 中仍有 `EXTI4_IRQHandler`，且 `.ioc` 中 `NVIC.EXTI4_IRQn` 已启用。
 6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`SPI_Receiver_Init()`、`CircuitID_Init()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
-8. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`；`.ioc` 中 ADC1 为两路扫描、连续转换关闭、由 TIM6 TRGO 触发。
+8. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`；`.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、由 TIM6 TRGO 触发。
 
 ## 11. ADC 采样
 
-ADC1 对两路电压做周期性双通道采样，结果写入 DMA 缓冲区，目前只保留最近一对数据，并在测试界面的 t0、t1 上显示电压。采样结果尚未接入频响计算。代码见 [USE/adc_sampler.c](USE/adc_sampler.c)。
+ADC1、ADC2 各自对一路电压做周期性采样，由同一个 TIM6 触发，结果写入各自的 DMA 缓冲区，目前只保留最近一对数据。采样结果尚未接入频响计算。代码见 [USE/adc_sampler.c](USE/adc_sampler.c)。
 
 ### 11.1 通道与引脚
 
 | 通道 | 引脚 | ADC 通道 | 含义 |
 |---|---|---|---|
-| rank 1 | PA0_C | `ADC_CHANNEL_0`（ADC1_INP0） | DUT 电压 |
-| rank 2 | PA1_C | `ADC_CHANNEL_1`（ADC1_INP1） | 电流转换后的电压 |
+| ADC1 | PA0_C | `ADC_CHANNEL_0`（ADC1_INP0） | DUT 电压 |
+| ADC2 | PA1_C | `ADC_CHANNEL_1`（ADC2_INP1） | 电流转换后的电压 |
 
 `_C` 为直连快速通道，经 SYSCFG 模拟开关接入 ADC。引脚配置为模拟模式，无上下拉。`PA0_C` 与普通 `PA0` 是同一个物理引脚，同一时刻只能选其中一条路径。
 
 ### 11.2 采样时序
 
 - 由 TIM6 TRGO（上升沿）触发 ADC。定时器 PSC=11、ARR=9，按 120 MHz 计数时钟计算，触发周期为 1 µs（1 MHz）。
-- 关闭连续转换，每次触发完成一次两通道扫描。采样时间为 1.5 个 ADC 周期。ADC 时钟由 PLL2 的 75 MHz 经 /2 分频为 37.5 MHz，低于 16 位 ADC 的时钟上限（50 MHz）。ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准，再启动 DMA。
+- 关闭连续转换，每次触发完成一次单通道转换。两路 ADC 由同一个 TIM6 TRGO 触发，采样时刻接近，但不是硬件同步模式。采样时间为 1.5 个 ADC 周期。ADC 时钟由 PLL2 的 75 MHz 经 /2 分频为 37.5 MHz，低于 16 位 ADC 的时钟上限（50 MHz）。ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准，再启动 DMA。
 - DMA1_Stream1 循环模式，半字（16 位）对齐。每填满半个缓冲区，回调保存该半区最后一对采样。
 
 ### 11.3 接口
 
 | 函数 / 类型 | 说明 |
 |---|---|
-| `uint8_t ADC_Sampler_Init(void)` | 启动 ADC1 DMA 和 TIM6，成功返回 1。`main.c` 中调用，失败报 E01 |
+| `uint8_t ADC_Sampler_Init(void)` | 校准并启动 ADC1、ADC2 的 DMA，再启动 TIM6，成功返回 1。`main.c` 中调用，失败报 E01 |
 | `uint8_t ADC_Sampler_GetLatest(ADC_Sample_t *out)` | 取最近一对采样，尚无数据时返回 0 |
 | `ADC_Sample_t` | `dut_voltage_raw`、`current_voltage_raw`：16 位原始码值；`sequence`：每完成一个半区加 1，0 表示无数据 |
 
 ### 11.4 待确认
 
-- 串口屏电压按 16 位满量程 65535、参考电压 3.3 V 换算（`ADC_SAMPLER_VREF_V`），实际 VREF 与量程待实测确认。
+- 码值到电压的换算参数为 16 位满量程 65535、参考电压 3.3 V（`ADC_SAMPLER_VREF_V`），目前未接入显示或计算，实际 VREF 与量程待实测确认。
 - 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
 - 1 MHz 为初始采样速率。需要其他速率时，修改 TIM6 的 PSC 和 ARR 即可。
