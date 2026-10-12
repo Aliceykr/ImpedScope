@@ -15,6 +15,7 @@
 - 跨阻前端下的阻抗 `Z = -R / H` 和导纳 `Y = -H / R`
 - 输入、输出幅值过小时丢弃该频点
 - UART4 驱动串口屏，显示频率、阻抗和运行状态
+- ADC1 双通道采样：PA0_C（DUT 电压）、PA1_C（电流转换电压），TIM6 触发，DMA 循环写入缓冲区（见第 11 节）
 
 ## 2. 工程结构
 
@@ -23,12 +24,15 @@
 ├─ USE/
 │  ├─ spi_receiver.h/.c   SPI1 帧接收、DMA、CS 边沿和数据解析
 │  ├─ circuit_id.h/.c     频响、阻抗和导纳计算
-│  └─ screen.h/.c         串口屏 UART4 输出和错误上报
+│  ├─ screen.h/.c         串口屏 UART4 输出和错误上报
+│  └─ adc_sampler.h/.c    ADC1 双通道定时器触发采样（DMA）
 ├─ Core/
 │  ├─ Src/main.c          系统初始化和主循环（USER CODE 区）
 │  ├─ Src/spi.c           SPI1、DMA、PA4 和 EXTI4 配置（CubeMX 生成，部分在 USER CODE 区）
 │  ├─ Src/stm32h7xx_it.c  中断入口（EXTI4 由 CubeMX 生成）
-│  └─ Src/usart.c         UART4 配置（CubeMX 生成）
+│  ├─ Src/usart.c         UART4 配置（CubeMX 生成）
+│  ├─ Src/adc.c           ADC1 配置（CubeMX 生成，两路扫描、TIM6 触发）
+│  └─ Src/tim.c           TIM6 配置（CubeMX 生成，TRGO 触发 ADC）
 ├─ Drivers/               STM32 HAL 和 CMSIS
 ├─ MDK-ARM/               Keil 工程文件
 └─ 9_30.ioc               STM32CubeMX 配置文件
@@ -371,3 +375,37 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 5 条指令，每条以
 5. `stm32h7xx_it.c` 中仍有 `EXTI4_IRQHandler`，且 `.ioc` 中 `NVIC.EXTI4_IRQn` 已启用。
 6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`SPI_Receiver_Init()`、`CircuitID_Init()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
+8. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`；`.ioc` 中 ADC1 为两路扫描、连续转换关闭、由 TIM6 TRGO 触发。
+
+## 11. ADC 采样
+
+ADC1 对两路电压做周期性双通道采样，结果写入 DMA 缓冲区，目前只保留最近一对数据。采样结果尚未接入频响计算或串口屏。代码见 [USE/adc_sampler.c](USE/adc_sampler.c)。
+
+### 11.1 通道与引脚
+
+| 通道 | 引脚 | ADC 通道 | 含义 |
+|---|---|---|---|
+| rank 1 | PA0_C | `ADC_CHANNEL_0`（ADC1_INP0） | DUT 电压 |
+| rank 2 | PA1_C | `ADC_CHANNEL_1`（ADC1_INP1） | 电流转换后的电压 |
+
+`_C` 为直连快速通道，经 SYSCFG 模拟开关接入 ADC。引脚配置为模拟模式，无上下拉。`PA0_C` 与普通 `PA0` 是同一个物理引脚，同一时刻只能选其中一条路径。
+
+### 11.2 采样时序
+
+- 由 TIM6 TRGO（上升沿）触发 ADC。定时器 PSC=11、ARR=9，按 120 MHz 计数时钟计算，触发周期为 1 µs（1 MHz）。
+- 关闭连续转换，每次触发完成一次两通道扫描。采样时间为 1.5 个 ADC 周期，ADC 时钟为 75 MHz。
+- DMA1_Stream1 循环模式，半字（16 位）对齐。每填满半个缓冲区，回调保存该半区最后一对采样。
+
+### 11.3 接口
+
+| 函数 / 类型 | 说明 |
+|---|---|
+| `uint8_t ADC_Sampler_Init(void)` | 启动 ADC1 DMA 和 TIM6，成功返回 1。`main.c` 中调用，失败报 E01 |
+| `uint8_t ADC_Sampler_GetLatest(ADC_Sample_t *out)` | 取最近一对采样，尚无数据时返回 0 |
+| `ADC_Sample_t` | `dut_voltage_raw`、`current_voltage_raw`：16 位原始码值；`sequence`：每完成一个半区加 1，0 表示无数据 |
+
+### 11.4 待确认
+
+- 输出为原始码值，电压量程、参考电压和换算系数未定。
+- 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
+- 1 MHz 为初始采样速率。需要其他速率时，修改 TIM6 的 PSC 和 ARR 即可。
