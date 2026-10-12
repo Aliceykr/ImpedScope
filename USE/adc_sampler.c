@@ -3,34 +3,50 @@
 #include "adc.h"
 #include "tim.h"
 
-/* 扫描序列长度：每次扫描依次转换通道 0 和通道 1。 */
-#define ADC_SAMPLER_SCAN_LEN         2u
-#define ADC_SAMPLER_HALF_LEN         (ADC_SAMPLER_PAIRS_PER_HALF * ADC_SAMPLER_SCAN_LEN)
-#define ADC_SAMPLER_BUF_LEN          (2u * ADC_SAMPLER_HALF_LEN)
+/* 两个 ADC 各自单通道，DMA 各用一个缓冲区；每个半缓冲区 PAIRS_PER_HALF 个采样。 */
+#define ADC_SAMPLER_BUF_LEN          (2u * ADC_SAMPLER_PAIRS_PER_HALF)
 
 /* DMA 按半字（16 位）写入，缓冲区用 uint16_t。 */
-static uint16_t adc_buf[ADC_SAMPLER_BUF_LEN];
+static uint16_t adc1_buf[ADC_SAMPLER_BUF_LEN];
+static uint16_t adc2_buf[ADC_SAMPLER_BUF_LEN];
 static ADC_Sample_t adc_latest;
 
-/* 取半缓冲区中最后一对采样作为最近结果。只在 DMA 中断中写入。 */
-static void ADC_Sampler_Publish(const uint16_t *half)
+/* 两个 ADC 由同一个 TIM6 TRGO 触发，采样时刻接近。
+ * ADC1 的回调负责递增 sequence，ADC2 只更新电流值。 */
+static void ADC_Sampler_UpdateDut(const uint16_t *half)
 {
-    const uint16_t *last = &half[ADC_SAMPLER_HALF_LEN - ADC_SAMPLER_SCAN_LEN];
-
-    adc_latest.dut_voltage_raw = last[0];
-    adc_latest.current_voltage_raw = last[1];
+    adc_latest.dut_voltage_raw = half[ADC_SAMPLER_PAIRS_PER_HALF - 1u];
     adc_latest.sequence++;
+}
+
+static void ADC_Sampler_UpdateCurrent(const uint16_t *half)
+{
+    adc_latest.current_voltage_raw = half[ADC_SAMPLER_PAIRS_PER_HALF - 1u];
 }
 
 uint8_t ADC_Sampler_Init(void)
 {
-    /* HAL 要求 pData 为 uint32_t*，实际按半字读写。 */
-    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, ADC_SAMPLER_BUF_LEN) != HAL_OK)
+    /* H7 上电后必须校准，否则偏移和增益误差会直接进入读数。 */
+    if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED) != HAL_OK)
+    {
+        return 0u;
+    }
+    if (HAL_ADCEx_Calibration_Start(&hadc2, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED) != HAL_OK)
     {
         return 0u;
     }
 
-    /* ADC 由 TIM6 TRGO 触发，定时器不启动就不会有采样。 */
+    /* HAL 要求 pData 为 uint32_t*，实际按半字读写。两路 DMA 都要先装载，再启动定时器。 */
+    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc1_buf, ADC_SAMPLER_BUF_LEN) != HAL_OK)
+    {
+        return 0u;
+    }
+    if (HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc2_buf, ADC_SAMPLER_BUF_LEN) != HAL_OK)
+    {
+        return 0u;
+    }
+
+    /* 两路 ADC 都由 TIM6 TRGO 触发，定时器不启动就不会有采样。 */
     if (HAL_TIM_Base_Start(&htim6) != HAL_OK)
     {
         return 0u;
@@ -62,7 +78,11 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        ADC_Sampler_Publish(&adc_buf[0]);
+        ADC_Sampler_UpdateDut(&adc1_buf[0]);
+    }
+    else if (hadc->Instance == ADC2)
+    {
+        ADC_Sampler_UpdateCurrent(&adc2_buf[0]);
     }
 }
 
@@ -71,6 +91,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        ADC_Sampler_Publish(&adc_buf[ADC_SAMPLER_HALF_LEN]);
+        ADC_Sampler_UpdateDut(&adc1_buf[ADC_SAMPLER_PAIRS_PER_HALF]);
+    }
+    else if (hadc->Instance == ADC2)
+    {
+        ADC_Sampler_UpdateCurrent(&adc2_buf[ADC_SAMPLER_PAIRS_PER_HALF]);
     }
 }
