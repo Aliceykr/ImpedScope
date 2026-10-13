@@ -27,6 +27,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "ad9833.h"
 #include "measure.h"
 #include "screen.h"
 /* USER CODE END Includes */
@@ -114,14 +115,17 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Screen_Init();
   Screen_SetStage("PERIPH");
+
+  /* 激励源:AD9833 挂在 SPI1(主机)上,FSYNC 由 ad9833.c 手动控制。必须在
+   * MX_SPI1_Init() 之后调用。初始化失败不致命,但之后测不到有效频响,
+   * 所以计入 E19 供串口屏显示。 */
+  if (AD9833_Init() == 0u)
+  {
+    Screen_ReportError(SCREEN_E19_AD9833_SPI);
+  }
+
   CircuitID_Init();
   Screen_SetStage("MODULE");
-
-  /* 频率源为内部扫描计划(measure.c 第 1 节),原 FPGA 经 SPI1 从机下发频率帧的
-   * 方案连同 spi_receiver.c 一并删除。MX_SPI1_Init() 仍会使能 EXTI4(PA4/CS),
-   * 这里关掉,避免 PA4 悬空时边沿中断空转。SPI1 外设本身上电仍被初始化,
-   * 留作后续驱动 AD9833(改为主机模式)复用。 */
-  HAL_NVIC_DisableIRQ(EXTI4_IRQn);
 
   if (ADC_Sampler_Init() == 0u)
   {

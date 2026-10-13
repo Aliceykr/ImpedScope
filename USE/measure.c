@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "ad9833.h"
 #include "adc.h"
 #include "screen.h"
 #include "tim.h"
@@ -29,7 +30,18 @@ static const uint32_t s_freq_plan[FREQ_PLAN_COUNT] = {
 
 void Freq_SourceSet(uint32_t frequency_hz)
 {
-    (void)frequency_hz;   /* AD9833 未接入,留空(见 measure.h 的说明) */
+    /* 必须输出与 Freq_PlanGet() 表值完全一致的频率:DFT 的旋转因子用的是表值,
+     * 两者不一致会让频率轴错位、窗口不再是整数周期,而且不会有任何报错。
+     * AD9833_SetFrequency() 内部按 f × 2^28 / MCLK 取整,25 MHz 下分辨率 0.093 Hz。 */
+    if (frequency_hz == 0u)
+    {
+        return;
+    }
+
+    if (AD9833_SetFrequency(frequency_hz) == 0u)
+    {
+        Screen_ReportError(SCREEN_E19_AD9833_SPI);
+    }
 }
 
 uint32_t Freq_PlanGet(uint8_t index)

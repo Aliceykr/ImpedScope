@@ -40,7 +40,8 @@ typedef enum
     SCREEN_E16_UART_BUSY  = 16u,  /* 上一条未发完本周期跳过，非致命        */
     SCREEN_E17_BIN_MISMATCH = 17u, /* 已弃用（旧的峰值 bin 协议），保留编号 */
     SCREEN_E18_WINDOW_TIMEOUT = 18u, /* 等待 ADC 窗口完成超时,非致命 */
-    SCREEN_ERROR_CODE_MAX = 18u
+    SCREEN_E19_AD9833_SPI = 19u,  /* AD9833 经 SPI1 写寄存器失败,非致命 */
+    SCREEN_ERROR_CODE_MAX = 19u
 } Screen_ErrorCode_t;
 
 /* 复位发送状态并记录起始时间；在 MX_UART4_Init() 之后调用。 */

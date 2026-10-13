@@ -38,7 +38,8 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "UART_TX",      /* E15 */
     "UART_BUSY",    /* E16 */
     "BIN_MISMATCH", /* E17 */
-    "WINDOW_TIMEOUT" /* E18 */
+    "WINDOW_TIMEOUT", /* E18 */
+    "AD9833_SPI"    /* E19 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */

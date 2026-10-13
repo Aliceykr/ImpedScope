@@ -599,6 +599,11 @@
           <GroupName>Application/User/USE</GroupName>
           <Files>
             <File>
+              <FileName>ad9833.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../USE/ad9833.c</FilePath>
+            </File>
+            <File>
               <FileName>measure.c</FileName>
               <FileType>1</FileType>
               <FilePath>../USE/measure.c</FilePath>

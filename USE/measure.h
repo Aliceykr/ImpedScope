@@ -13,7 +13,7 @@ extern "C" {
  * 一次测量的完整链路:
  *
  *   Freq_PlanGet(k)                 取第 k 个扫描频率
- *     -> Freq_SourceSet(f)          设定 AD9833(当前为空桩)
+ *     -> Freq_SourceSet(f)          设定 AD9833(SPI1 主机,见 USE/ad9833.c)
  *     -> ADC_Sampler_SetFrequency(f)  开一个采样窗口
  *          两个 ADC 各自单通道,由同一个 TIM6 TRGO 触发,DMA 循环写入缓冲区;
  *          窗口内对两路做该频率的单频 DFT,得到 Ui、Uo 的复数分量
@@ -33,13 +33,11 @@ extern "C" {
 #define FREQ_PLAN_COUNT   5u
 
 /*
- * 设置信号源(AD9833)到目标频率。
+ * 设置信号源(AD9833)到目标频率。内部调用 USE/ad9833.c 的 AD9833_SetFrequency(),
+ * 失败时上报 E19;调用前必须先 AD9833_Init()。
  *
- * 当前为桩函数:不驱动任何硬件,仅由调用方保证节拍正确。
- * 后续接入 AD9833 时,在此写 SPI 频率字,并确认输出频率与 Freq_PlanGet() 返回的
- * 表值完全一致 —— DFT 用表值算旋转因子,两者不一致会让频率轴错位,
- * 窗口不再是整数周期(泄漏不为零),而且不会有任何报错。
- * 另外 AD9833 换频后需要建立时间,应在开窗口前等待稳定。
+ * 输出频率必须与 Freq_PlanGet() 返回的表值完全一致 —— DFT 用表值算旋转因子,
+ * 两者不一致会让频率轴错位、窗口不再是整数周期(泄漏不为零),而且不会有任何报错。
  */
 void Freq_SourceSet(uint32_t frequency_hz);
 
