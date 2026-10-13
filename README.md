@@ -115,6 +115,14 @@ x̄ 为窗口内的平均值（去除直流）
 
 `|U|` 低于 `CIR_INPUT_MIN_AMP` 报 E04，低于 `CIR_OUTPUT_MIN_AMP` 报 E05。两个门限都是占位值，待实测确定。
 
+幅值门限只说明"这个频点上有多少能量"，说不出这些能量是不是来自信号源，所以另有一个与信号绝对大小无关的相干性判据：
+
+```text
+kappa = |U| / (sqrt(2) · RMS_ac)
+```
+
+`RMS_ac` 是同一个窗口里去直流后的交流有效值。窗口里是单频正弦时 `kappa = 1.0`；窗口里只有噪声时 `kappa ≈ sqrt(2/N)`（N = 30000 时约 0.008，差一百多倍）。`kappa` 低于 `CIR_MIN_COHERENCE`（默认 0.2）就报 E14（`Ui`）/ E15（`Uo`）—— 这正是"信号源没接、输入悬空"的情形：噪声落在测量频点上的分量能让幅值门限通过，却过不了相干性判据。两路的幅值与相干性同时显示在串口屏的 `t7`、`t8`（第 7 节），便于现场判断本底有多大。
+
 ### 5.3 传递函数 H = Uo / Ui
 
 分子分母同乘 `conj(Ui)`，分母变为实数 `|Ui|²`：
@@ -222,6 +230,7 @@ Uo 幅度 = 0.5 V × |H|                  ≈ 0.63 V       （不削顶）
 | `CIR_FEEDBACK_RESISTOR_OHM` | `measure.h` | 200.0 | 反馈电阻 R 的标称值，实际值需标定 |
 | `CIR_INPUT_MIN_AMP` | `measure.h` | 4.0 | `|Ui|` 幅值下限（码值），占位，待实测 |
 | `CIR_OUTPUT_MIN_AMP` | `measure.h` | 4.0 | `|Uo|` 幅值下限（码值），占位，待实测 |
+| `CIR_MIN_COHERENCE` | `measure.h` | 0.2 | 相干性下限 `|U| / (sqrt(2)·RMS_ac)`，低于此值报 E14/E15 |
 | `CIR_H_MIN_MAG` | `measure.h` | 1e-6 | `|H|` 下限，低于此值 Z 不可靠 |
 | `AD9833_MCLK_HZ` | `ad9833.h` | 25000000 | AD9833 主时钟，必须与实际接线一致（第 12 节） |
 
@@ -229,7 +238,7 @@ PA4（AD9833 的 FSYNC）由 [USE/ad9833.c](USE/ad9833.c) 手动配置成推挽�
 
 ## 7. 串口屏
 
-UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6），每条以 `FF FF FF` 结尾。串口屏页面需要建立同名文本框 `t0`~`t6`。
+UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 9 条指令（t0~t8），每条以 `FF FF FF` 结尾。串口屏页面需要建立同名文本框 `t0`~`t8`。
 
 | 控件 | 内容 | 示例 |
 |---|---|---|
@@ -240,6 +249,8 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 | `t4` | 电纳 B = Im[Y]（mS） | `B:-0.213`，无结果时 `B:-` |
 | `t5` | 运行阶段或最近一次错误 | `stage:LOOP`、`stage:E12 WINDOW_TIMEOUT x12` |
 | `t6` | 心跳，每刷新周期 +1 | `beat:1234` |
+| `t7` | 窗口诊断：`Ui` 单频幅值（码值）与相干性 | `Ui:123.45 c:0.98`，尚无窗口时 `Ui:-` |
+| `t8` | 窗口诊断：`Uo` 单频幅值（码值）与相干性 | `Uo:98.76 c:0.97`，尚无窗口时 `Uo:-` |
 
 ### 7.1 运行阶段
 
@@ -270,6 +281,8 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 | E11 | UART_BUSY | `screen.c` | 上一条指令未发完，本周期跳过 | 非致命 |
 | E12 | WINDOW_TIMEOUT | `main.c` | 等待 ADC 窗口完成超时 | 非致命 |
 | E13 | AD9833_SPI | `ad9833.c` 的调用方（`main.c` / `measure.c`） | SPI1 写 AD9833 寄存器失败（HAL 返回非 OK 或超时） | 非致命 |
+| E14 | CIR_UI_INCOH | `measure.c` | `Ui` 有交流分量但不是单频（`kappa < CIR_MIN_COHERENCE`），信号源未接或未输出 | 非致命 |
+| E15 | CIR_UO_INCOH | `measure.c` | `Uo` 有交流分量但不是单频（`kappa < CIR_MIN_COHERENCE`） | 非致命 |
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
@@ -279,7 +292,7 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 - **两路增益未标定。** 两路 ADC 的增益误差会直接进入 `H`。见第 11 节。
 - **两路输入路径有差异。** ADC1/ADC2 工作在规则组同步模式（见 10.2 节），采样时刻完全相同；残余相位误差来自 PA0_C/PA1_C 两个模拟开关与源阻抗的带宽差异（第 11 节第 2 点）。
 - **每个频点要等一个完整窗口。** 换频率会重启窗口；窗口长度从 1 ms（10 kHz）到 100 ms（100 Hz）。窗口未完成就切下一个频率，该频点拿不到结果。
-- **幅值门限是占位值。** `CIR_INPUT_MIN_AMP`、`CIR_OUTPUT_MIN_AMP` 为 4 个码值，需要用实际噪声水平确定。
+- **幅值门限是占位值。** `CIR_INPUT_MIN_AMP`、`CIR_OUTPUT_MIN_AMP` 为 4 个码值，需要用实际噪声水平确定。这两道门限只保证"有不小的交流分量"，判断"信号源是不是真的在驱动被测电路"靠相干性判据 `CIR_MIN_COHERENCE`（见 5.2 节），它不需要现场标定。
 - **AD9833 频率字量化。** 频率字是 28 位整数，25 MHz MCLK 下分辨率 0.093 Hz。100 Hz 处取整误差最大可达 ±0.047 Hz（约 460 ppm），在一个 10 周期窗口内引入约 0.5~0.9° 的相位误差与极小的泄漏；1 kHz 以上可忽略。详见第 12.4 节。
 
 ## 9. 编译与维护
@@ -331,6 +344,7 @@ ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，各自对
 
 - `ADC_Sampler_SetFrequency(f)` 设定频率，并从当前块序号开始新窗口。同步模式下两路只有一个块序号，不存在起点对齐问题。
 - DMA 回调里从每个 32 位字中同时取出两路样本、按同一个权重一并累加，所以两路的累加点数必然相同，到齐即窗口完成。
+- 累加器同时累计两路样本的平方和，窗口完成时算出各自的交流有效值（`ui_rms`、`uo_rms`），供 `CircuitID_Compute()` 做相干性判据（见 5.2 节）。这两个值不参与 H、Z、Y 的计算。
 - `ADC_Sampler_GetWindow()` 取出完成的窗口，主循环交给 `CircuitID_Compute()`。
 - 同一频率重复调用 `SetFrequency` 不会重启窗口。
 
@@ -341,7 +355,7 @@ ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，各自对
 | `uint8_t ADC_Sampler_Init(void)` | 校准两路 ADC 并启动同步转换（只用主 ADC 的 DMA），再启动 TIM6。`main.c` 中调用，失败报 E01 |
 | `uint8_t ADC_Sampler_SetFrequency(uint32_t)` | 设定频率并开始新窗口。频率非法返回 0 |
 | `uint8_t ADC_Sampler_GetWindow(ADC_Window_t *)` | 取出已完成的窗口；没有新窗口时返回 0 |
-| `ADC_Window_t` | `frequency_hz`、`sample_count`，以及 `ui_re`、`ui_im`、`uo_re`、`uo_im`（单频 DFT 的复数分量） |
+| `ADC_Window_t` | `frequency_hz`、`sample_count`，`ui_re`、`ui_im`、`uo_re`、`uo_im`（单频 DFT 的复数分量），以及 `ui_rms`、`uo_rms`（去直流后的交流有效值，只用于相干性判据） |
 
 采样速率 300 kHz。改动时**必须同时**修改 TIM6 的 PSC/ARR（硬件触发率）与 `ADC_SAMPLER_RATE_HZ`（DFT 频率轴）—— 两者没有任何编译期或运行期联动，只改一处会让频率轴静默错位且不报任何错。
 

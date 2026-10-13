@@ -6,7 +6,7 @@
 /* 指令格式：控件名.txt="值" + 0xFF 0xFF 0xFF。 */
 #define SCREEN_CMD_END_BYTE          0xFFu
 #define SCREEN_CMD_END_COUNT         3u
-#define SCREEN_TX_BUFFER_BYTES        256u
+#define SCREEN_TX_BUFFER_BYTES        320u
 #define SCREEN_VALUE_CHARS           40u
 #define SCREEN_STAGE_CHARS           16u
 #define SCREEN_BLOCKING_TIMEOUT_MS   100u   /* 9600bps 下一条 t5 约 30ms */
@@ -33,13 +33,17 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "UART_TX",        /* E10 */
     "UART_BUSY",      /* E11 */
     "WINDOW_TIMEOUT", /* E12 */
-    "AD9833_SPI"      /* E13 */
+    "AD9833_SPI",     /* E13 */
+    "CIR_UI_INCOH",   /* E14 */
+    "CIR_UO_INCOH"    /* E15 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */
 static uint8_t s_tx_buffer[SCREEN_TX_BUFFER_BYTES];
 static FRF_Point_t s_result;
 static uint8_t s_has_result;
+static uint8_t s_has_debug;
+static float   s_debug[4];      /* Ui 幅值、Uo 幅值、Ui 相干性、Uo 相干性 */
 static uint32_t s_last_tick;
 static uint32_t s_beat;
 static char s_stage[SCREEN_STAGE_CHARS];
@@ -61,6 +65,7 @@ void Screen_Init(void)
     uint8_t index;
 
     s_has_result = 0u;
+    s_has_debug = 0u;
     s_last_tick = HAL_GetTick();
     s_beat = 0u;
     s_last_error_code = 0u;
@@ -85,6 +90,15 @@ void Screen_SetResult(const FRF_Point_t *result)
 void Screen_ClearResult(void)
 {
     s_has_result = 0u;
+}
+
+void Screen_SetDebug(float ui_mag_lsb, float uo_mag_lsb, float ui_coherence, float uo_coherence)
+{
+    s_debug[0] = ui_mag_lsb;
+    s_debug[1] = uo_mag_lsb;
+    s_debug[2] = ui_coherence;
+    s_debug[3] = uo_coherence;
+    s_has_debug = 1u;
 }
 
 void Screen_SetStage(const char *stage)
@@ -329,6 +343,21 @@ static uint16_t Screen_BuildCommands(void)
         (void)snprintf(value, sizeof(value), "B:-");
     }
     length = Screen_AppendCommand(length, "t4", value);
+
+    /* t7、t8:窗口诊断量（幅值单位 ADC 码值，c 为相干性）。计算失败时也会更新，
+     * 所以"没信号"时这里能看到两路本底有多大、相干性有多低。 */
+    if (s_has_debug != 0u)
+    {
+        (void)snprintf(value, sizeof(value), "Ui:%.2f c:%.2f", (double)s_debug[0], (double)s_debug[2]);
+        length = Screen_AppendCommand(length, "t7", value);
+        (void)snprintf(value, sizeof(value), "Uo:%.2f c:%.2f", (double)s_debug[1], (double)s_debug[3]);
+        length = Screen_AppendCommand(length, "t8", value);
+    }
+    else
+    {
+        length = Screen_AppendCommand(length, "t7", "Ui:-");
+        length = Screen_AppendCommand(length, "t8", "Uo:-");
+    }
 
     /* t6:心跳,每刷新周期 +1 */
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);

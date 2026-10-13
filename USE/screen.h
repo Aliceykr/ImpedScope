@@ -33,7 +33,9 @@ typedef enum
     SCREEN_E11_UART_BUSY      = 11u, /* 上一条未发完本周期跳过，非致命           */
     SCREEN_E12_WINDOW_TIMEOUT = 12u, /* 等待 ADC 窗口完成超时，非致命            */
     SCREEN_E13_AD9833_SPI     = 13u, /* AD9833 经 SPI1 写寄存器失败，非致命      */
-    SCREEN_ERROR_CODE_MAX     = 13u
+    SCREEN_E14_CIR_UI_INCOH   = 14u, /* Ui 有交流分量但不是单频，信号源未接/未输出 */
+    SCREEN_E15_CIR_UO_INCOH   = 15u, /* Uo 有交流分量但不是单频                  */
+    SCREEN_ERROR_CODE_MAX     = 15u
 } Screen_ErrorCode_t;
 
 /* 复位发送状态并记录起始时间；在 MX_UART4_Init() 之后调用。 */
@@ -41,6 +43,11 @@ void Screen_Init(void);
 
 /* 保存最近一个有效频点的计算结果，下次刷新时显示。 */
 void Screen_SetResult(const FRF_Point_t *result);
+
+/* 保存最近一个窗口的诊断量（两路单频幅值、两路相干性），与计算结果是否有效无关：
+ * 计算失败时（正是"没有信号"的情况）t7、t8 仍能显示幅值，否则屏幕上只剩一个错误码。
+ * 幅值单位是 ADC 码值，相干性 1.0 表示纯单频。 */
+void Screen_SetDebug(float ui_mag_lsb, float uo_mag_lsb, float ui_coherence, float uo_coherence);
 
 /* 清除已保存的结果,下一次刷新时 t0~t4 显示 "-"。用于失败/超时路径,避免显示陈旧读数。 */
 void Screen_ClearResult(void);
@@ -57,7 +64,7 @@ void Screen_Fatal(uint8_t code);
 /* 由 Error_Handler() 在关中断后调用：尝试阻塞发送致命码，然后返回。 */
 void Screen_FatalReportBlocking(void);
 
-/* 在主循环中反复调用;每 500 ms 非阻塞刷新全部 7 个文本框(t0~t6)。 */
+/* 在主循环中反复调用;每 500 ms 非阻塞刷新全部 9 个文本框(t0~t8)。 */
 void Screen_Poll(void);
 
 #ifdef __cplusplus

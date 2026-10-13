@@ -97,7 +97,10 @@ uint32_t Freq_PlanGet(uint8_t index);
 
 /* 一个窗口的单频 DFT 结果。
  * 幅值换算:|U| = 2 * sqrt(re^2 + im^2) / sample_count,单位为 ADC 码值。
- * 两路使用同一个 sample_count,所以 H = Uo / Ui 与归一化无关。 */
+ * 两路使用同一个 sample_count,所以 H = Uo / Ui 与归一化无关。
+ *
+ * ui_rms / uo_rms 是去掉直流后的交流有效值,只用于判断窗口里到底有没有单频信号
+ * (相干性判据),不参与 H、Z、Y 的计算。 */
 typedef struct
 {
     uint32_t frequency_hz;
@@ -106,6 +109,8 @@ typedef struct
     double   ui_im;
     double   uo_re;
     double   uo_im;
+    double   ui_rms;        /* 窗口内 Ui 去掉直流后的交流有效值，单位 ADC 码值 */
+    double   uo_rms;        /* 窗口内 Uo 去掉直流后的交流有效值，单位 ADC 码值 */
 } ADC_Window_t;
 
 /* 校准两路 ADC,再启动双 ADC 同步转换(只用主 ADC 的 DMA),最后启动 TIM6;成功返回 1,失败返回 0。 */
@@ -140,9 +145,19 @@ uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out);
  * 200 LSB)。1 kohm 在 10 mS 时会削顶。 */
 #define CIR_FEEDBACK_RESISTOR_OHM   200.0f
 
-/* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值视为噪声，待实测确定。 */
+/* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值只剩量化噪声，结果没有
+ * 意义；这只是一道兜底门槛，"有没有信号"由下面的相干性判据负责。 */
 #define CIR_INPUT_MIN_AMP           4.0f
 #define CIR_OUTPUT_MIN_AMP          4.0f
+
+/* 相干性下限。定义 kappa = (2|S|/N) / (sqrt(2) * RMS_ac)：
+ *   窗口里是单频正弦时 kappa = 1.0；
+ *   窗口里只有噪声时 kappa 约为 sqrt(2/N)（N = 30000 时约 0.008，差一百多倍）。
+ * 该判据与信号绝对大小无关,不需要现场标定,回答的就是"到底有没有在驱动被测电路"：
+ * 输入悬空、信号源没接、AD9833 没输出时,噪声落在测量频点上的分量仍可能让幅值门限
+ * 通过(实测就是这样),但 kappa 会远低于此值,于是报 E14/E15。
+ * 取 0.2 留了 20 倍以上的噪声余量,同时容忍波形带少量谐波失真(方波约 0.9、三角波约 1.0)。 */
+#define CIR_MIN_COHERENCE           0.2f
 
 /* |H| 下限：低于此值阻抗趋于无穷，结果不可靠。 */
 #define CIR_H_MIN_MAG               1e-6f

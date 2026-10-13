@@ -13,6 +13,7 @@
 #define MEASURE_PI         3.14159265358979323846
 #define MEASURE_TWO_PI     6.283185307179586
 #define MEASURE_LOG_GUARD  1e-20
+#define MEASURE_SQRT2      1.4142135623730951
 
 /* ==========================================================================
  * 1. 频率扫描计划
@@ -86,6 +87,8 @@ typedef struct
     double   w_im;
     double   ui_sum;        /* sum Ui，用于去除直流 */
     double   uo_sum;        /* sum Uo，用于去除直流 */
+    double   ui_sq;         /* sum Ui^2，用于算交流有效值 */
+    double   uo_sq;         /* sum Uo^2，用于算交流有效值 */
 } ADC_Acc_t;
 
 static ADC_Acc_t s_acc;
@@ -101,6 +104,29 @@ static void ADC_Sampler_Accumulate(const uint32_t *block);
 static void ADC_Sampler_Phasor(const ADC_Acc_t *acc, double sum_x, double acc_re, double acc_im,
                                double *re, double *im);
 static void ADC_Sampler_TryFinish(void);
+static double ADC_Sampler_AcRms(double sum_sq, double sum_x, uint32_t count);
+
+/* 去掉直流后的交流有效值：RMS = sqrt(sum(x^2)/N - mean^2)。N 为 0 时返回 0。 */
+static double ADC_Sampler_AcRms(double sum_sq, double sum_x, uint32_t count)
+{
+    double mean;
+    double variance;
+
+    if (count == 0u)
+    {
+        return 0.0;
+    }
+
+    mean = sum_x / (double)count;
+    variance = (sum_sq / (double)count) - (mean * mean);
+
+    if (variance <= 0.0)
+    {
+        return 0.0;
+    }
+
+    return sqrt(variance);
+}
 
 static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block)
 {
@@ -117,6 +143,8 @@ static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block)
     acc->w_im = 0.0;
     acc->ui_sum = 0.0;
     acc->uo_sum = 0.0;
+    acc->ui_sq = 0.0;
+    acc->uo_sq = 0.0;
 }
 
 /* 处理一个 DMA 块（ADC_SAMPLER_PAIRS_PER_HALF 对采样点）。只在 DMA 中断中调用。
@@ -149,6 +177,8 @@ static void ADC_Sampler_Accumulate(const uint32_t *block)
         s_acc.w_im += s_acc.rot_im;
         s_acc.ui_sum += ui;
         s_acc.uo_sum += uo;
+        s_acc.ui_sq += ui * ui;
+        s_acc.uo_sq += uo * uo;
         s_acc.count++;
 
         /* 权重推进一个采样点：rot *= step。 */
@@ -186,6 +216,10 @@ static void ADC_Sampler_TryFinish(void)
     s_window.sample_count = s_target;
     ADC_Sampler_Phasor(&s_acc, s_acc.ui_sum, s_acc.ui_re, s_acc.ui_im, &s_window.ui_re, &s_window.ui_im);
     ADC_Sampler_Phasor(&s_acc, s_acc.uo_sum, s_acc.uo_re, s_acc.uo_im, &s_window.uo_re, &s_window.uo_im);
+
+    /* 交流有效值：与单频幅值一起构成相干性判据（见 measure.h 的 CIR_MIN_COHERENCE）。 */
+    s_window.ui_rms = ADC_Sampler_AcRms(s_acc.ui_sq, s_acc.ui_sum, s_acc.count);
+    s_window.uo_rms = ADC_Sampler_AcRms(s_acc.uo_sq, s_acc.uo_sum, s_acc.count);
     s_ready = 1u;
 
     /* 下一窗口从本窗口结束后的下一个块开始：两路共用一个块序号，起点天然一致。 */
@@ -450,10 +484,24 @@ static uint8_t Calib_Apply(float frequency_hz, double *h_re, double *h_im)
  * ========================================================================== */
 
 static uint8_t CircuitID_IsFinite(double value);
+static double CircuitID_Coherence(double magnitude, double rms);
 
 void CircuitID_Init(void)
 {
     /* 当前为单频窗口模式，暂时没有运行时状态。 */
+}
+
+/* 相干性 kappa = 单频幅值 / (sqrt(2) * 交流有效值)。
+ * 纯单频为 1.0；窗口里只有噪声时远小于 1（约 sqrt(2/N)）。
+ * rms 为 0（全直流或无采样点）时返回 0，按"没有信号"处理。 */
+static double CircuitID_Coherence(double magnitude, double rms)
+{
+    if (rms <= 0.0)
+    {
+        return 0.0;
+    }
+
+    return magnitude / (MEASURE_SQRT2 * rms);
 }
 
 uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
@@ -466,6 +514,8 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     double h_im;
     double h_magnitude_squared;
     double h_magnitude;
+    double ui_coh;
+    double uo_coh;
 
     if ((input == (const ADC_Window_t *)0) ||
         (output == (FRF_Point_t *)0))
@@ -508,6 +558,27 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     if (uo_mag < (double)CIR_OUTPUT_MIN_AMP)
     {
         Screen_ReportError(SCREEN_E05_CIR_UO_LOW);
+        return 0u;
+    }
+
+    /* 相干性判据：幅值门限只能说明"有不小的交流分量"，说不出这分量是不是单频。
+     * 输入悬空、信号源没接时，噪声落在测量频点上的分量照样能过幅值门限，于是屏幕
+     * 会显示一堆看着正常的 |Y|、φY —— 这里用 kappa 把它挡下来。 */
+    ui_coh = CircuitID_Coherence(ui_mag, input->ui_rms);
+    uo_coh = CircuitID_Coherence(uo_mag, input->uo_rms);
+
+    /* 先送到串口屏（t7、t8），这样失败时也能看到两路幅值与相干性。 */
+    (void)Screen_SetDebug((float)ui_mag, (float)uo_mag, (float)ui_coh, (float)uo_coh);
+
+    if (ui_coh < (double)CIR_MIN_COHERENCE)
+    {
+        Screen_ReportError(SCREEN_E14_CIR_UI_INCOH);
+        return 0u;
+    }
+
+    if (uo_coh < (double)CIR_MIN_COHERENCE)
+    {
+        Screen_ReportError(SCREEN_E15_CIR_UO_INCOH);
         return 0u;
     }
 
