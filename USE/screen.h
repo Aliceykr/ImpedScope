@@ -14,7 +14,9 @@ extern "C" {
 
 /* 1：通信测试界面（t0~t2 为 SPI 收包计数，t4 为最近原始帧）；
  * 0：正常显示频响结果。 */
-#define SCREEN_SPI_TEST              1u
+/* 0:正常显示频响结果(|Y| / phiY / G / B,7 个文本框 t0~t6)。
+ * 1:通信测试界面(旧的 SPI 收包计数),FPGA 方案已废弃,保留仅供调试。 */
+#define SCREEN_SPI_TEST              0u
 
 /*
  * 错误码，说明见 README.md 第 8.3 节。0 保留表示"无错误"。
@@ -42,7 +44,8 @@ typedef enum
     SCREEN_E15_UART_TX    = 15u,  /* Transmit_IT 返回非 OK，非致命       */
     SCREEN_E16_UART_BUSY  = 16u,  /* 上一条未发完本周期跳过，非致命      */
     SCREEN_E17_BIN_MISMATCH = 17u, /* 两通道峰值 bin 不一致，非致命       */
-    SCREEN_ERROR_CODE_MAX = 17u
+    SCREEN_E18_WINDOW_TIMEOUT = 18u, /* 等待 ADC 窗口完成超时,非致命 */
+    SCREEN_ERROR_CODE_MAX = 18u
 } Screen_ErrorCode_t;
 
 /* 复位发送状态并记录起始时间；在 MX_UART4_Init() 之后调用。 */
@@ -51,19 +54,22 @@ void Screen_Init(void);
 /* 保存最近一个有效频点的计算结果，下次刷新时显示。 */
 void Screen_SetResult(const FRF_Point_t *result);
 
+/* 清除已保存的结果,下一次刷新时 t0~t4 显示 "-"。用于失败/超时路径,避免显示陈旧读数。 */
+void Screen_ClearResult(void);
+
 /* 记录当前运行阶段（如 "BOOT"、"LOOP"），不立即发送。 */
 void Screen_SetStage(const char *stage);
 
 /* 非致命错误上报：只记录计数，中断安全。 */
 void Screen_ReportError(uint8_t code);
 
-/* 致命错误：锁定 t4 显示并进入 Error_Handler()。 */
+/* 致命错误：锁定 t5 显示并进入 Error_Handler()。 */
 void Screen_Fatal(uint8_t code);
 
 /* 由 Error_Handler() 在关中断后调用：尝试阻塞发送致命码，然后返回。 */
 void Screen_FatalReportBlocking(void);
 
-/* 在主循环中反复调用；每 500 ms 非阻塞刷新全部 5 个文本框。 */
+/* 在主循环中反复调用;每 500 ms 非阻塞刷新全部 7 个文本框(t0~t6)。 */
 void Screen_Poll(void);
 
 #ifdef __cplusplus

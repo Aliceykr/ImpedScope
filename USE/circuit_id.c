@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "calib.h"
 #include "screen.h"
 
 #define CIR_PI              3.14159265358979323846
@@ -76,6 +77,10 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     h_re = ((input->uo_re * input->ui_re) + (input->uo_im * input->ui_im)) / ui_mag2;
     h_im = ((input->uo_im * input->ui_re) - (input->uo_re * input->ui_im)) / ui_mag2;
 
+    /* 标定修正:扣掉两路增益差与固定相位差。放在这里,后面的 |H|、angle(H)、Z、Y
+     * 全部基于修正后的 H。表内当前为恒等值(1.0, 0.0),此调用不改变结果。 */
+    (void)Calib_Apply((float)input->frequency_hz, &h_re, &h_im);
+
     h_magnitude_squared = (h_re * h_re) + (h_im * h_im);
     if (!CircuitID_IsFinite(h_re) || !CircuitID_IsFinite(h_im) ||
         !CircuitID_IsFinite(h_magnitude_squared))
@@ -137,13 +142,17 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
 
         output->y_mag_siemens = (float)y_magnitude;
         output->y_phase_deg = (float)(atan2(y_im, y_re) * 180.0 / CIR_PI);
+        output->y_conductance_siemens = (float)y_re;   /* G = Re[Y] */
+        output->y_susceptance_siemens = (float)y_im;   /* B = Im[Y] */
     }
 
     if (!CircuitID_IsFinite(output->z_mag_ohm) ||
         !CircuitID_IsFinite(output->z_mag_dB) ||
         !CircuitID_IsFinite(output->z_phase_deg) ||
         !CircuitID_IsFinite(output->y_mag_siemens) ||
-        !CircuitID_IsFinite(output->y_phase_deg))
+        !CircuitID_IsFinite(output->y_phase_deg) ||
+        !CircuitID_IsFinite(output->y_conductance_siemens) ||
+        !CircuitID_IsFinite(output->y_susceptance_siemens))
     {
         Screen_ReportError(SCREEN_E14_CIR_ZY_NAN);
         (void)memset(output, 0, sizeof(*output));

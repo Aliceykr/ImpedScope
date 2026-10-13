@@ -27,10 +27,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "spi_receiver.h"
 #include "circuit_id.h"
 #include "screen.h"
 #include "adc_sampler.h"
+#include "freq_plan.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,6 +40,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* 单个频率等待窗口完成的超时。最长窗口是 100 Hz 的 100 ms,取 500 ms 留裕量。
+ * 注意这是墙钟时间;不要改成"循环计数",HAL_Delay(1) 因 SysTick 的 +1 分频
+ * 实际可能耗 2 ms,计数式超时会翻倍。 */
+#define MEASURE_WAIT_TIMEOUT_MS   500u
 
 /* USER CODE END PD */
 
@@ -113,15 +118,17 @@ int main(void)
   Screen_SetStage("PERIPH");
   CircuitID_Init();
   Screen_SetStage("MODULE");
-  if (SPI_Receiver_Init() == 0u)
-  {
-    Screen_Fatal(SCREEN_E02_SPI_DMA);
-  }
+
+  /* 频率源已改为内部扫描计划(freq_plan),原 SPI1 从机接收(FPGA 方案)废弃。
+   * MX_SPI1_Init() 仍会使能 EXTI4(PA4/CS),这里关掉:否则 PA4 悬空时,
+   * spi_receiver.c 的 EXTI 回调会持续误报 E02 SPI_DMA 并反复重装 DMA。 */
+  HAL_NVIC_DisableIRQ(EXTI4_IRQn);
+
   if (ADC_Sampler_Init() == 0u)
   {
     Screen_Fatal(SCREEN_E01_HAL_INIT);
   }
-  Screen_SetStage("SPI");
+  Screen_SetStage("SCAN");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -129,24 +136,50 @@ int main(void)
   Screen_SetStage("LOOP");
   while (1)
   {
-    FREQ_Record_t freq_record;
-    ADC_Window_t window;
-    FRF_Point_t frf_point;
+    uint8_t k;
 
-    while (SPI_Receiver_TryGetRecord(&freq_record) != 0u)
+    /* 顺序扫描 5 个频率,循环往复。 */
+    for (k = 0u; k < FREQ_PLAN_COUNT; ++k)
     {
-      (void)ADC_Sampler_SetFrequency(freq_record.frequency_hz);
-    }
+      uint32_t f = Freq_PlanGet(k);
+      ADC_Window_t window;
+      FRF_Point_t frf_point;
+      uint32_t deadline;
+      uint8_t  got = 0u;
 
-    if (ADC_Sampler_GetWindow(&window) != 0u)
-    {
+      Freq_SourceSet(f);                    /* AD9833 桩,当前空操作 */
+      (void)ADC_Sampler_SetFrequency(f);
+
+      /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */
+      deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+      while ((int32_t)(HAL_GetTick() - deadline) < 0)
+      {
+        if (ADC_Sampler_GetWindow(&window) != 0u)
+        {
+          got = 1u;
+          break;
+        }
+        Screen_Poll();
+        HAL_Delay(1u);
+      }
+
+      if (got == 0u)
+      {
+        Screen_ReportError(SCREEN_E18_WINDOW_TIMEOUT);
+        Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
+        continue;
+      }
+
       if (CircuitID_Compute(&window, &frf_point) != 0u)
       {
         Screen_SetResult(&frf_point);
       }
+      else
+      {
+        Screen_ClearResult();               /* 计算失败同样清掉旧读数 */
+      }
+      Screen_Poll();
     }
-
-    Screen_Poll();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

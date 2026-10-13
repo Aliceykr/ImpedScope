@@ -22,8 +22,11 @@ extern "C" {
 /* 1：计算阻抗和导纳；0：只计算传递函数。 */
 #define CIR_DUT_TOPOLOGY            1u
 
-/* 跨阻反馈电阻 R，单位 Ω。 */
-#define CIR_FEEDBACK_RESISTOR_OHM   1000.0f
+/* R 取值依据:Ui = 1 Vpp -> 幅度 ±0.5 V;ADC 范围 0~3.3 V,静态偏置
+ * 1.65 V。不削顶要求 0.5*|H| < 1.5 V,取安全裕量 |H| <= 2,则 R <= 2/|Y|max
+ * = 2/10 mS = 200 ohm。单挡即可覆盖 0.1~10 mS 全范围(最弱点 0.1 mS 仍约
+ * 200 LSB)。原 1000 ohm 在 10 mS 时会削顶。 */
+#define CIR_FEEDBACK_RESISTOR_OHM   200.0f
 
 /* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值视为噪声，待实测确定。 */
 #define CIR_INPUT_MIN_AMP           4.0f
@@ -44,6 +47,8 @@ typedef struct
     float z_phase_deg;
     float y_mag_siemens;
     float y_phase_deg;
+    float y_conductance_siemens;    /* G = Re[Y] = -h_re/R,单位 S */
+    float y_susceptance_siemens;    /* B = Im[Y] = -h_im/R,单位 S */
 #endif
 
     uint8_t valid;

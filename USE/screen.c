@@ -39,7 +39,8 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "CIR_ZY_NAN",   /* E14 */
     "UART_TX",      /* E15 */
     "UART_BUSY",    /* E16 */
-    "BIN_MISMATCH"  /* E17 */
+    "BIN_MISMATCH", /* E17 */
+    "WINDOW_TIMEOUT" /* E18 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */
@@ -86,6 +87,11 @@ void Screen_SetResult(const FRF_Point_t *result)
 {
     s_result = *result;
     s_has_result = 1u;
+}
+
+void Screen_ClearResult(void)
+{
+    s_has_result = 0u;
 }
 
 void Screen_SetStage(const char *stage)
@@ -164,7 +170,8 @@ static void Screen_SendT4Raw(const char *value)
     const uint8_t *cursor;
     uint32_t spin;
 
-    length = Screen_AppendCommand(length, "t4", value);
+    /* 状态/错误通道是 t5(见 Screen_BuildCommands);t4 已改作 B 读数。 */
+    length = Screen_AppendCommand(length, "t5", value);
 
     /* 丢弃上一次未能完成的传输:只清发送请求位,不动 gState。 */
     ATOMIC_CLEAR_BIT(huart4.Instance->CR1, (USART_CR1_TXEIE_TXFNFIE | USART_CR1_TCIE));
@@ -214,7 +221,7 @@ static void Screen_SendT4Blocking(const char *value, uint32_t timeout)
     {
         (void)HAL_UART_Abort(&huart4);
     }
-    length = Screen_AppendCommand(length, "t4", value);
+    length = Screen_AppendCommand(length, "t5", value);
     (void)HAL_UART_Transmit(&huart4, s_tx_buffer, length, timeout);
 }
 
@@ -290,46 +297,71 @@ static uint16_t Screen_BuildCommands(void)
     (void)snprintf(value, sizeof(value), "hdr:%lu", (unsigned long)stats.frame_ok);
     length = Screen_AppendCommand(length, "t2", value);
 #else
-    /* t0：频率 */
+    /* t0:频率 (Hz)。|Y|、G、B 存储单位是 S,串口屏显示 mS,故均 x1000。 */
     if (s_has_result != 0u)
     {
-        (void)snprintf(value, sizeof(value), "freq:%.0f", (double)s_result.frequency_hz);
+        (void)snprintf(value, sizeof(value), "f:%.0f", (double)s_result.frequency_hz);
     }
     else
     {
-        (void)snprintf(value, sizeof(value), "freq:-");
+        (void)snprintf(value, sizeof(value), "f:-");
     }
     length = Screen_AppendCommand(length, "t0", value);
 
-    /* t1：阻抗幅值 */
+    /* t1:|Y| (mS) */
     if (s_has_result != 0u)
     {
-        (void)snprintf(value, sizeof(value), "zmag:%.2f", (double)s_result.z_mag_ohm);
+        (void)snprintf(value, sizeof(value), "Y:%.3f",
+                       (double)s_result.y_mag_siemens * 1000.0);
     }
     else
     {
-        (void)snprintf(value, sizeof(value), "zmag:-");
+        (void)snprintf(value, sizeof(value), "Y:-");
     }
     length = Screen_AppendCommand(length, "t1", value);
 
-    /* t2：阻抗相位 */
+    /* t2:phiY (度) */
     if (s_has_result != 0u)
     {
-        (void)snprintf(value, sizeof(value), "zph:%.2f", (double)s_result.z_phase_deg);
+        (void)snprintf(value, sizeof(value), "P:%.2f", (double)s_result.y_phase_deg);
     }
     else
     {
-        (void)snprintf(value, sizeof(value), "zph:-");
+        (void)snprintf(value, sizeof(value), "P:-");
     }
     length = Screen_AppendCommand(length, "t2", value);
 #endif
 
-    /* t3：心跳 */
-    (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
+    /* t3:G = Re[Y] (mS) */
+    if (s_has_result != 0u)
+    {
+        (void)snprintf(value, sizeof(value), "G:%.3f",
+                       (double)s_result.y_conductance_siemens * 1000.0);
+    }
+    else
+    {
+        (void)snprintf(value, sizeof(value), "G:-");
+    }
     length = Screen_AppendCommand(length, "t3", value);
 
+    /* t4:B = Im[Y] (mS) */
+    if (s_has_result != 0u)
+    {
+        (void)snprintf(value, sizeof(value), "B:%.3f",
+                       (double)s_result.y_susceptance_siemens * 1000.0);
+    }
+    else
+    {
+        (void)snprintf(value, sizeof(value), "B:-");
+    }
+    length = Screen_AppendCommand(length, "t4", value);
+
+    /* t6:心跳,每刷新周期 +1(原 t3;t3/t4 让位给 G/B 后移到 t6) */
+    (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
+    length = Screen_AppendCommand(length, "t6", value);
+
 #if SCREEN_SPI_TEST == 1u
-    /* t4：最近一次收满的原始帧，格式 raw:十六进制（16 字节）。 */
+    /* t5:最近一次收满的原始帧,格式 raw:十六进制(8 字节) */
     (void)snprintf(value, sizeof(value), "raw:");
     for (index = 0u; index < SPI_FRAME_TOTAL_BYTES; ++index)
     {
@@ -337,7 +369,7 @@ static uint16_t Screen_BuildCommands(void)
                        (unsigned)stats.last_frame[index]);
     }
 #else
-    /* t4：阶段或最近一次错误 */
+    /* t5:阶段或最近一次错误(原 t4;t4 已改作 B 读数) */
     if (s_fatal_latched != 0u)
     {
         (void)snprintf(value, sizeof(value), "stage:E%02d %s",
@@ -358,7 +390,7 @@ static uint16_t Screen_BuildCommands(void)
         }
     }
 #endif
-    length = Screen_AppendCommand(length, "t4", value);
+    length = Screen_AppendCommand(length, "t5", value);
 
     return length;
 }
