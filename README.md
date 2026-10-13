@@ -2,14 +2,11 @@
 
 ## 1. 工程用途
 
-本工程运行在 **STM32H750XBH6** 上。主循环按内部扫描计划（`measure.c` 第 1 节）依次设定 5 个测试频点（100/300/1k/3k/10k Hz），信号源由 AD9833 产生（驱动待接入）。STM32 用两路 ADC 同时采集 DUT 的电压 `Ui` 和电流转换后的电压 `Uo`，在该频率上做单频 DFT，计算导纳 `|Y|`、φY、G、B，并把结果显示在串口屏上。
+本工程运行在 **STM32H750XBH6** 上。主循环按内部扫描计划（`measure.c` 第 1 节）依次设定 5 个测试频点（100/300/1k/3k/10k Hz），激励由 AD9833 经 SPI1 产生（见第 13 节）。STM32 用两路 ADC 同时采集 DUT 的电压 `Ui` 和电流转换后的电压 `Uo`，在该频率上做单频 DFT，计算导纳 `|Y|`、φY、G、B，并把结果显示在串口屏上。
 
 主要功能：
 
-- SPI1 从机 8 位接收，DMA 每次收一帧（8 字节），收完重新装载
-- 硬件 CS（NSS，PA4）界定帧边界，EXTI 双边沿检测帧开始与结束
-- 帧头 `0x07 0x08`、帧尾 `0x00 0x00` 校验，短帧丢弃
-- 4 字节大端频率解析，记录队列在 DMA 回调中入队，计算在主循环中完成
+- AD9833（SPI1 主机）产生正弦激励，5 个频点由内部扫描计划给出；换频无毛刺，失败报 E19
 - ADC1、ADC2 各自单通道采样（PA0_C、PA1_C），共用 TIM6 触发，DMA 循环写入缓冲区
 - 每个频率开一个采样窗口，对两路做单频 DFT，得到 `Ui`、`Uo` 的复数分量
 - 传递函数 `H = Uo / Ui`，阻抗 `Z = -R / H`，导纳 `Y = -H / R`
@@ -21,13 +18,14 @@
 ```text
 9_30/
 ├─ USE/
-│  ├─ measure.h/.c        测量核心：5 频率扫描计划（AD9833 空桩）、
-│  │                      ADC 采样与单频 DFT、H/Z/Y 计算、双路标定修正
+│  ├─ ad9833.h/.c         AD9833 DDS 激励源驱动（SPI1 主机，PA4 作软件 FSYNC）
+│  ├─ measure.h/.c        测量核心：5 频率扫描计划、ADC 采样与单频 DFT、
+│  │                      H/Z/Y 计算、双路标定修正
 │  └─ screen.h/.c         串口屏 UART4 输出和错误上报
 ├─ Core/
 │  ├─ Src/main.c          系统初始化和主循环（USER CODE 区）
-│  ├─ Src/spi.c           SPI1、DMA、PA4 和 EXTI4 配置（CubeMX 生成，部分在 USER CODE 区）
-│  ├─ Src/stm32h7xx_it.c  中断入口（EXTI4 处理函数在 USER CODE 区）
+│  ├─ Src/spi.c           SPI1 主机配置（CubeMX 生成，USER CODE 区留空）
+│  ├─ Src/stm32h7xx_it.c  中断入口
 │  ├─ Src/usart.c         UART4 配置（CubeMX 生成）
 │  ├─ Src/adc.c           ADC1、ADC2 配置（CubeMX 生成，单通道、TIM6 触发）
 │  └─ Src/tim.c           TIM6 配置（CubeMX 生成，TRGO 触发 ADC）
@@ -60,8 +58,8 @@ H  = Uo / Ui = -Y × R
 
 > ⚠ 频率来源已改为内部扫描计划（`measure.c` 第 1 节），不再由 FPGA 经 SPI1 下发频率帧。
 > 原接收实现 `USE/spi_receiver.c/.h` **已从工程删除**，需要时可用
-> `git show 9ab44f4:USE/spi_receiver.c` 取回。`main.c` 仍在初始化里调用
-> `HAL_NVIC_DisableIRQ(EXTI4_IRQn)` 关掉 PA4 的 CS 边沿中断。
+> `git show 9ab44f4:USE/spi_receiver.c` 取回。SPI1 现已改为主机驱动 AD9833（第 13 节），
+> 原先那套 PA4/NSS 与 EXTI4 配置也随该路径一并移除。
 > 以下协议描述仅作历史存档，当前没有任何代码实现它。
 
 ## 4. SPI 帧协议（**已废弃**，仅存档）
@@ -101,6 +99,8 @@ SPI 配置：
 | PG11 | SPI1_SCK |
 | PA4  | SPI1_NSS / CS（EXTI4 双边沿）**暂定，待 PCB 确认** |
 
+这几根线现在用于 AD9833：PG11 → SCLK、PB5 → SDATA、PA4 → FSYNC（普通 GPIO 输出，不再是 SPI1_NSS）；PG9 未使用。详见第 13 节。
+
 接收流程：
 
 1. DMA 装载后等待一帧 8 字节。
@@ -117,7 +117,7 @@ SPI 配置：
 
 ```text
 主循环（measure.c 的扫描计划）──> 取第 k 个频率 f（100/300/1k/3k/10k）
-                        │  Freq_SourceSet(f)  ── 设定 AD9833（当前为空桩）
+                        │  Freq_SourceSet(f)  ── 经 SPI1 写 AD9833 频率寄存器（失败报 E19）
                         ▼
           ADC_Sampler_SetFrequency(f)  ── 设定频率，开始新的采样窗口
                         │
@@ -280,8 +280,9 @@ Uo 幅度 = 0.5 V × |H|                  ≈ 0.63 V       （不削顶）
 | `CIR_INPUT_MIN_AMP` | `measure.h` | 4.0 | `|Ui|` 幅值下限（码值），占位，待实测 |
 | `CIR_OUTPUT_MIN_AMP` | `measure.h` | 4.0 | `|Uo|` 幅值下限（码值），占位，待实测 |
 | `CIR_H_MIN_MAG` | `measure.h` | 1e-6 | `|H|` 下限，低于此值 Z 不可靠 |
+| `AD9833_MCLK_HZ` | `ad9833.h` | 25000000 | AD9833 主时钟，必须与实际接线一致（第 13 节） |
 
-CS（PA4）的 GPIO 与 EXTI4 配置在 `spi.c` 的 USER CODE 区，`.ioc` 中 PA4 仍配置为 `SPI1_NSS`。该通道属于已删除的 FPGA 接收路径，现在只在 `main.c` 里被显式关掉中断；后续把 SPI1 改为主机驱动 AD9833 时，PA4 按普通 GPIO 输出使用。
+PA4（AD9833 的 FSYNC）由 [USE/ad9833.c](USE/ad9833.c) 手动配置成推挽输出，`.ioc` 里不分配 PA4 —— CubeMX 不支持同一引脚既做 `SPI1_NSS` 又做普通 GPIO，而 AD9833 需要软件片选。详见第 13 节。
 
 ## 8. 串口屏
 
@@ -330,7 +331,8 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 | E15 | UART_TX | `screen.c` | `HAL_UART_Transmit_IT()` 返回非 OK | 非致命 |
 | E16 | UART_BUSY | `screen.c` | 上一条指令未发完，本周期跳过 | 非致命 |
 | E17 | BIN_MISMATCH | — | 已弃用（旧的峰值 bin 协议），保留编号 | — |
-| E18 | WINDOW_TIMEOUT | `main.c` | 等待 ADC 窗口完成超时（T7） | 非致命 |
+| E18 | WINDOW_TIMEOUT | `main.c` | 等待 ADC 窗口完成超时 | 非致命 |
+| E19 | AD9833_SPI | `ad9833.c` 的调用方（`main.c` / `measure.c`） | SPI1 写 AD9833 寄存器失败（HAL 返回非 OK 或超时） | 非致命 |
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
@@ -341,6 +343,7 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 - **两个 ADC 不是硬件同步模式。** 它们由同一个 TIM6 TRGO 触发，采样时刻接近，但有几百纳秒的偏差。频率越高，相位误差越大。
 - **每个频点要等一个完整窗口。** 换频率会重启窗口；窗口长度从 1 ms（10 kHz）到 100 ms（100 Hz）。窗口未完成就切下一个频率，该频点拿不到结果。
 - **幅值门限是占位值。** `CIR_INPUT_MIN_AMP`、`CIR_OUTPUT_MIN_AMP` 为 4 个码值，需要用实际噪声水平确定。
+- **AD9833 频率字量化。** 频率字是 28 位整数，25 MHz MCLK 下分辨率 0.093 Hz。100 Hz 处取整误差最大可达 ±0.047 Hz（约 460 ppm），在一个 10 周期窗口内引入约 0.5~0.9° 的相位误差与极小的泄漏；1 kHz 以上可忽略。详见第 13.4 节。
 
 ## 10. 编译与维护
 
@@ -348,17 +351,17 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 
 - STM32CubeMX 6.18
 - STM32H7 HAL FW 1.13
-- ARMCC V5
+- Arm Compiler 6（ArmClang）V6.24 —— `.uvprojx` 的 `pArmCC` 已钉到 V6.24，换机器装的是别的版本时要同步改这一项
 - 系统时钟 480 MHz，HCLK 120 MHz，APB 60 MHz
 - SPI1 内核时钟 75 MHz（PLL2），ADC 时钟 37.5 MHz（PLL2 经 /2）
 
 重新生成 CubeMX 代码后，请检查：
 
-1. Keil 工程中仍包含 `USE/measure.c` 和 `USE/screen.c`。
+1. Keil 工程中仍包含 `USE/ad9833.c`、`USE/measure.c` 和 `USE/screen.c`。
 2. 头文件路径仍包含 `../USE`。
-3. SPI1 数据宽度仍为 8 bit，NSS 为硬件输入，DMA 为普通模式（长度 8 字节）。
-4. `spi.c` 的 MspInit USER CODE 区仍包含 PA4 的 GPIO 配置和 EXTI4 双边沿配置。
-5. `stm32h7xx_it.c` 的 USER CODE 区仍有 `EXTI4_IRQHandler`。`.ioc` 中不需要 `NVIC.EXTI4_IRQn`，EXTI4 的使能由 `spi.c` 负责。
+3. `.ioc` 与 `spi.c` 中 SPI1 仍为主机、16 位、CPOL=High / CPHA=1Edge（Mode 2）、软件 NSS、波特率预分频 8；SPI1 不再使用 DMA 和中断。
+4. `spi.c` 的 MspInit 只配置 PB5/PG9/PG11 三根 SPI1 引脚，不碰 PA4（PA4 由 `ad9833.c` 配成 GPIO 输出）。
+5. `main.c` 的 USER CODE 区在 `MX_SPI1_Init()` 之后调用 `AD9833_Init()`，失败报 E19。
 6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Freq_PlanGet()`/`Freq_SourceSet()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
 8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发，ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`。
@@ -398,13 +401,15 @@ ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触
 |---|---|
 | `uint8_t ADC_Sampler_Init(void)` | 校准并启动两路 DMA，再启动 TIM6。`main.c` 中调用，失败报 E01 |
 | `uint8_t ADC_Sampler_SetFrequency(uint32_t)` | 设定频率并开始新窗口。频率非法返回 0 |
-- 采样速率 300 kHz。改动时**必须同时**修改 TIM6 的 PSC/ARR（硬件触发率）与 `ADC_SAMPLER_RATE_HZ`（DFT 频率轴）—— 两者没有任何编译期或运行期联动，只改一处会让频率轴静默错位且不报任何错。
+| `uint8_t ADC_Sampler_GetWindow(ADC_Window_t *)` | 取出已完成的窗口；没有新窗口时返回 0 |
 | `ADC_Window_t` | `frequency_hz`、`sample_count`，以及 `ui_re`、`ui_im`、`uo_re`、`uo_im`（单频 DFT 的复数分量） |
+
+采样速率 300 kHz。改动时**必须同时**修改 TIM6 的 PSC/ARR（硬件触发率）与 `ADC_SAMPLER_RATE_HZ`（DFT 频率轴）—— 两者没有任何编译期或运行期联动，只改一处会让频率轴静默错位且不报任何错。
 
 ### 11.5 待确认
 
 - 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
-- 采样速率 1 MHz 是初始值。需要其他速率时，修改 TIM6 的 PSC 和 ARR，并同步修改 `ADC_SAMPLER_RATE_HZ`。
+- 采样速率 300 kHz 是按 5 个频点的整数周期条件选定的（见 6.1 节）。需要其他速率时，要同时改 TIM6 的 PSC/ARR、`ADC_SAMPLER_RATE_HZ` **和 `.ioc` 里的 TIM6**，否则用 CubeMX 重新生成代码会把硬件触发率改回去，导致频率轴静默错位。
 - 窗口长度的 10 周期和上下限是初始值，需要结合实测调整。
 
 ## 12. 标定方法
@@ -428,7 +433,7 @@ ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触
 H_true(f) = H_meas(f) / H_thru(f)
 ```
 
-`H_thru(f)` 需要按频率存成表，中间频率用插值。
+`H_thru(f)` 需要按频率存成表。注意 `measure.c` 第 3 节的 `Calib_Lookup()` 是**就近取值、不做插值**：当前 5 个扫描频点与标定点一一重合，所以没有影响，但改动扫描频率表时必须同步改标定表。
 
 ### 12.2 反馈电阻 R 的标定
 
@@ -443,3 +448,66 @@ H_true(f) = H_meas(f) / H_thru(f)
 ### 12.4 时刻偏差的根本解决
 
 如果第 3 点的时刻偏差对结果影响太大，需要改为 ADC 双重同步模式（ADC1 为主、ADC2 为从），让两路在同一个采样时刻开始转换。这需要修改 `.ioc` 的多模式设置，并调整 `measure.c` 第 2 节的 DMA 处理。
+
+## 13. AD9833 信号源
+
+激励由 AD9833 DDS 产生，挂在 MCU 的 SPI1 上。驱动是 [USE/ad9833.h](USE/ad9833.h) / [USE/ad9833.c](USE/ad9833.c)，在 `main.c` 的 USER CODE 2 区由 `AD9833_Init()` 初始化。
+
+### 13.1 接线
+
+| STM32 | 方向 | AD9833 | 说明 |
+|---|---|---|---|
+| PG11（SPI1_SCK） | 输出 | SCLK | 串行时钟，75 MHz / 8 = 9.375 MHz |
+| PB5（SPI1_MOSI） | 输出 | SDATA | 串行数据，MSB 在前 |
+| PA4 | 输出 | FSYNC | 片选，低有效。普通 GPIO 推挽，由驱动在每条命令前后手动拉低/拉高 |
+| PG9（SPI1_MISO） | — | — | 未使用（AD9833 只写不读） |
+| 3.3 V / GND | — | VCC / GND | — |
+
+> ⚠ **MCLK 必须真的是 25 MHz。** `AD9833_MCLK_HZ` 默认按“模块自带 25 MHz 晶振”写。若你的板子靠 MCU 的 MCO 引脚给 AD9833 供时钟，本工程还没有配置 MCO，需要另行配置并确认频率，否则所有输出频率都会按比例偏。
+
+### 13.2 SPI1 配置及理由
+
+| 项 | 值 | 理由 |
+|---|---|---|
+| 模式 | 主机 | AD9833 是从机 |
+| 数据宽度 | 16 位 | 一条 AD9833 写命令正好 16 位，一个 `HAL_SPI_TransmitReceive()` 发完整帧，FSYNC 全程保持低电平 |
+| CPOL / CPHA | High / 1Edge（Mode 2） | AD9833 在 SCLK 下降沿锁存数据 |
+| NSS | 软件 | 硬件 NSS 在 `SPE=1` 期间一直保持低电平，无法在两条命令之间抬起来给 AD9833 分帧 |
+| 波特率 | 75 MHz / 8 = 9.375 MHz | AD9833 的 SCLK 上限 40 MHz |
+| 首 bit | MSB | 与 D15 对齐 |
+
+驱动用 `HAL_SPI_TransmitReceive()`（而不是 `HAL_SPI_Transmit()`）：H7 HAL 的阻塞发送路径既不检查也不清 OVR（`SPI_CloseTransfer()` 只在 `State != HAL_SPI_STATE_BUSY_TX` 时才处理 OVR），全双工主机只发不收会让 RX FIFO 堆满。把每帧的 RX 顺手读走即可保持 SPI 状态干净 —— MISO 没接线，读回的数据直接丢弃。
+
+### 13.3 寄存器位定义（数据手册 Table 8）
+
+```text
+D15 D14 = 00        控制寄存器
+D13 B28      = 0x2000   1：连续两次 16 位写拼成 28 位频率
+D12 HLB      = 0x1000   B28=0 时选高/低 14 位
+D11 FSEL     = 0x0800   0=FREQ0 1=FREQ1
+D10 PSEL     = 0x0400   0=PHASE0 1=PHASE1
+D9  保留，写 0
+D8  RESET    = 0x0100
+D7  SLEEP1   = 0x0080
+D6  SLEEP12  = 0x0040
+D5  OPBITEN  = 0x0020
+D4  保留，写 0          （AD9834 这里是 SIGN/PIB，AD9833 没有这一位）
+D3  DIV2     = 0x0008
+D2  保留，写 0
+D1  MODE     = 0x0002   1=三角波 0=正弦波
+D0  保留，写 0
+```
+
+Table 15（`OPBITEN=1` 时决定 VOUT）：`DIV2=0` 输出 DAC MSB/2（方波频率 f/2），`DIV2=1` 输出 DAC MSB（方波频率 f）；`OPBITEN=1` 且 `MODE=1` 是保留组合。
+
+以上位定义是逐位核对过的重点：把 `RESET` 写到 D9、`OPBITEN` 写到 D6、`DIV2` 写成 D4、`MODE` 写成 D2 都是常见抄错点，症状分别是“复位/关输出无效”“切方波后没输出”“三角波不生效”。频响测量只用正弦波，`AD9833_SetWave()` 的三角/方波仅供硬件调试。
+
+### 13.4 频率与切换
+
+- 频率字 = `round(f × 2^28 / MCLK)`，由 `AD9833_SetFrequency()` 计算并限幅到 MCLK/2。
+- **无毛刺切换**：写“当前没被选中”的那个频率寄存器（FREQ0/FREQ1 乒乓），最后用一次控制字写原子翻转 `FSEL`，相位累加器不清零。
+- **量化误差**：25 MHz 下每个 LSB 是 0.093 Hz，取整误差最大 ±0.047 Hz。相对误差在最低频 100 Hz 处最大（约 460 ppm），在 10 周期窗口内约合 0.5~0.9° 相位偏差；1 kHz 以上可忽略。AD9833 换频本身是即时的，驱动不再额外等待建立时间。
+
+### 13.5 与扫描计划的配合
+
+`Freq_SourceSet(f)`（`measure.c` 第 1 节）内部调用 `AD9833_SetFrequency(f)`，`f` 就是 `Freq_PlanGet()` 返回的表值，SPI 写失败时报 E19。DFT 的旋转因子用的是同一张表，两者必须严格一致。
