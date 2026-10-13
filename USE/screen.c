@@ -21,25 +21,19 @@
 static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
 {
     "",
-    "HAL_INIT",     /* E01 */
-    "SPI_DMA",      /* E02 */
-    "SPI_FRAME",    /* E03 */
-    "SPI_NAN",      /* E04 */
-    "SPI_LEN",      /* E05 */
-    "SPI_QFULL",    /* E06 */
-    "CIR_CFG",      /* E07 */
-    "CIR_NAN_IN",   /* E08 */
-    "CIR_UI_LOW",   /* E09 */
-    "CIR_UO_LOW",   /* E10 */
-    "CIR_H_NAN",    /* E11 */
-    "CIR_OUT_NAN",  /* E12 */
-    "CIR_H_LOW",    /* E13 */
-    "CIR_ZY_NAN",   /* E14 */
-    "UART_TX",      /* E15 */
-    "UART_BUSY",    /* E16 */
-    "BIN_MISMATCH", /* E17 */
-    "WINDOW_TIMEOUT", /* E18 */
-    "AD9833_SPI"    /* E19 */
+    "HAL_INIT",       /* E01 */
+    "CIR_CFG",        /* E02 */
+    "CIR_NAN_IN",     /* E03 */
+    "CIR_UI_LOW",     /* E04 */
+    "CIR_UO_LOW",     /* E05 */
+    "CIR_H_NAN",      /* E06 */
+    "CIR_OUT_NAN",    /* E07 */
+    "CIR_H_LOW",      /* E08 */
+    "CIR_ZY_NAN",     /* E09 */
+    "UART_TX",        /* E10 */
+    "UART_BUSY",      /* E11 */
+    "WINDOW_TIMEOUT", /* E12 */
+    "AD9833_SPI"      /* E13 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */
@@ -240,14 +234,14 @@ void Screen_Poll(void)
     /* 上一条还没发完则跳过本周期，不阻塞主循环。 */
     if (huart4.gState != HAL_UART_STATE_READY)
     {
-        Screen_ReportError(SCREEN_E16_UART_BUSY);
+        Screen_ReportError(SCREEN_E11_UART_BUSY);
         return;
     }
 
     length = Screen_BuildCommands();
     if (HAL_UART_Transmit_IT(&huart4, s_tx_buffer, length) != HAL_OK)
     {
-        Screen_ReportError(SCREEN_E15_UART_TX);
+        Screen_ReportError(SCREEN_E10_UART_TX);
     }
 }
 
@@ -336,7 +330,7 @@ static uint16_t Screen_BuildCommands(void)
     }
     length = Screen_AppendCommand(length, "t4", value);
 
-    /* t6:心跳,每刷新周期 +1(原 t3;t3/t4 让位给 G/B 后移到 t6) */
+    /* t6:心跳,每刷新周期 +1 */
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
     length = Screen_AppendCommand(length, "t6", value);
 
@@ -364,3 +358,4 @@ static uint16_t Screen_BuildCommands(void)
 
     return length;
 }
+

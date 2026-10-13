@@ -11,7 +11,7 @@ extern "C" {
 /*
  * AD9833 DDS 信号源驱动（频响测量的激励源）。
  *
- * 硬件连接（复用原 SPI1 的引脚）：
+ * 硬件连接（SPI1 引脚）：
  *   PG11 = SPI1_SCK  ->  AD9833 SCLK
  *   PB5  = SPI1_MOSI ->  AD9833 SDATA
  *   PA4  = GPIO 推挽输出 -> AD9833 FSYNC（低有效片选，由本驱动手动控制）

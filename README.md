@@ -6,7 +6,7 @@
 
 主要功能：
 
-- AD9833（SPI1 主机）产生正弦激励，5 个频点由内部扫描计划给出；换频无毛刺，失败报 E19
+- AD9833（SPI1 主机）产生正弦激励，5 个频点由内部扫描计划给出；换频无毛刺，失败报 E13
 - ADC1、ADC2 硬件同步采样（PA0_C、PA1_C，主从同步模式），由 TIM6 触发，结果打包进 CDR、DMA 循环写入缓冲区
 - 每个频率开一个采样窗口，对两路做单频 DFT，得到 `Ui`、`Uo` 的复数分量
 - 传递函数 `H = Uo / Ui`，阻抗 `Z = -R / H`，导纳 `Y = -H / R`
@@ -60,14 +60,14 @@ H  = Uo / Ui = -Y × R
 
 ```text
 主循环（measure.c 的扫描计划）──> 取第 k 个频率 f（100/300/1k/3k/10k）
-                        │  Freq_SourceSet(f)  ── 经 SPI1 写 AD9833 频率寄存器（失败报 E19）
+                        │  Freq_SourceSet(f)  ── 经 SPI1 写 AD9833 频率寄存器（失败报 E13）
                         ▼
           ADC_Sampler_SetFrequency(f)  ── 设定频率，开始新的采样窗口
                         │
                         │  DMA 中断中从 CDR 拆出两路样本并累加单频 DFT
                         ▼
           ADC_Sampler_GetWindow()     ── 窗口完成时取出 Ui、Uo 的复数分量
-                        │  （带墙钟超时；超时报 E18 并清结果）
+                        │  （带墙钟超时；超时报 E12 并清结果）
                         ▼
           CircuitID_Compute()         ── 计算 H、Z、Y、G、B，标定修正，检查有效性
                         │  有效结果
@@ -113,7 +113,7 @@ x̄ 为窗口内的平均值（去除直流）
 |U| = 2 |S| / N
 ```
 
-`|U|` 低于 `CIR_INPUT_MIN_AMP` 报 E09，低于 `CIR_OUTPUT_MIN_AMP` 报 E10。两个门限都是占位值，待实测确定。
+`|U|` 低于 `CIR_INPUT_MIN_AMP` 报 E04，低于 `CIR_OUTPUT_MIN_AMP` 报 E05。两个门限都是占位值，待实测确定。
 
 ### 5.3 传递函数 H = Uo / Ui
 
@@ -136,7 +136,7 @@ H_im   = (Uo_im·Ui_re − Uo_re·Ui_im) / |Ui|²
 相位 (°)  = atan2(H_im, H_re) × 180 / π
 ```
 
-`H` 的结果若不是有限数，报 E11。
+`H` 的结果若不是有限数，报 E06。
 
 ### 5.4 频率
 
@@ -155,7 +155,7 @@ Z_im = +R · H_im / |H|²
 Z 相位 = atan2(Z_im, Z_re) × 180 / π
 ```
 
-若 `|H|² ≤ CIR_H_MIN_MAG²`，Z 趋于无穷大，结果不可靠，报 E13 并丢弃。
+若 `|H|² ≤ CIR_H_MIN_MAG²`，Z 趋于无穷大，结果不可靠，报 E08 并丢弃。
 
 导纳：
 
@@ -168,7 +168,7 @@ Y_im = -H_im / R
 Y 相位 = atan2(Y_im, Y_re) × 180 / π
 ```
 
-Z 或 Y 的任一结果非有限，报 E14 并丢弃。
+Z 或 Y 的任一结果非有限，报 E09 并丢弃。
 
 `|Z|` 只依赖 `|H|` 和 `R`，不需要 ADC 的参考电压。但 `|H|` 的绝对值会受两路增益差影响，见第 11 节。
 
@@ -238,7 +238,7 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 | `t2` | 导纳角 φY（°） | `P:-12.34`，无结果时 `P:-` |
 | `t3` | 电导 G = Re[Y]（mS） | `G:0.977`，无结果时 `G:-` |
 | `t4` | 电纳 B = Im[Y]（mS） | `B:-0.213`，无结果时 `B:-` |
-| `t5` | 运行阶段或最近一次错误 | `stage:LOOP`、`stage:E18 WINDOW_TIMEOUT x12` |
+| `t5` | 运行阶段或最近一次错误 | `stage:LOOP`、`stage:E12 WINDOW_TIMEOUT x12` |
 | `t6` | 心跳，每刷新周期 +1 | `beat:1234` |
 
 ### 7.1 运行阶段
@@ -258,18 +258,18 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 | 码 | 名称 | 位置 | 触发条件 | 类型 |
 |---|---|---|---|---|
 | E01 | HAL_INIT | CubeMX 生成的 `MX_*_Init()`，`ADC_Sampler_Init()` | 外设初始化或 ADC 校准、DMA 启动失败 | 致命 |
-| E07 | CIR_CFG | `measure.c` | `R ≤ 0`、频率为 0 或窗口为空 | 非致命 |
-| E08 | CIR_NAN_IN | `measure.c` | 窗口的 Ui、Uo 分量非有限 | 非致命 |
-| E09 | CIR_UI_LOW | `measure.c` | `\|Ui\|` 幅值低于 `CIR_INPUT_MIN_AMP` | 非致命 |
-| E10 | CIR_UO_LOW | `measure.c` | `\|Uo\|` 幅值低于 `CIR_OUTPUT_MIN_AMP` | 非致命 |
-| E11 | CIR_H_NAN | `measure.c` | H 非有限 | 非致命 |
-| E12 | CIR_OUT_NAN | `measure.c` | 频率、dB、相位输出非有限 | 非致命 |
-| E13 | CIR_H_LOW | `measure.c` | `\|H\|` 过小，无法计算 Z | 非致命 |
-| E14 | CIR_ZY_NAN | `measure.c` | Z 或 Y 非有限 | 非致命 |
-| E15 | UART_TX | `screen.c` | `HAL_UART_Transmit_IT()` 返回非 OK | 非致命 |
-| E16 | UART_BUSY | `screen.c` | 上一条指令未发完，本周期跳过 | 非致命 |
-| E18 | WINDOW_TIMEOUT | `main.c` | 等待 ADC 窗口完成超时 | 非致命 |
-| E19 | AD9833_SPI | `ad9833.c` 的调用方（`main.c` / `measure.c`） | SPI1 写 AD9833 寄存器失败（HAL 返回非 OK 或超时） | 非致命 |
+| E02 | CIR_CFG | `measure.c` | `R ≤ 0`、频率为 0 或窗口为空 | 非致命 |
+| E03 | CIR_NAN_IN | `measure.c` | 窗口的 Ui、Uo 分量非有限 | 非致命 |
+| E04 | CIR_UI_LOW | `measure.c` | `\|Ui\|` 幅值低于 `CIR_INPUT_MIN_AMP` | 非致命 |
+| E05 | CIR_UO_LOW | `measure.c` | `\|Uo\|` 幅值低于 `CIR_OUTPUT_MIN_AMP` | 非致命 |
+| E06 | CIR_H_NAN | `measure.c` | H 非有限 | 非致命 |
+| E07 | CIR_OUT_NAN | `measure.c` | 频率、dB、相位输出非有限 | 非致命 |
+| E08 | CIR_H_LOW | `measure.c` | `\|H\|` 过小，无法计算 Z | 非致命 |
+| E09 | CIR_ZY_NAN | `measure.c` | Z 或 Y 非有限 | 非致命 |
+| E10 | UART_TX | `screen.c` | `HAL_UART_Transmit_IT()` 返回非 OK | 非致命 |
+| E11 | UART_BUSY | `screen.c` | 上一条指令未发完，本周期跳过 | 非致命 |
+| E12 | WINDOW_TIMEOUT | `main.c` | 等待 ADC 窗口完成超时 | 非致命 |
+| E13 | AD9833_SPI | `ad9833.c` 的调用方（`main.c` / `measure.c`） | SPI1 写 AD9833 寄存器失败（HAL 返回非 OK 或超时） | 非致命 |
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
@@ -298,7 +298,7 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 2. 头文件路径仍包含 `../USE`。
 3. `.ioc` 与 `spi.c` 中 SPI1 仍为主机、16 位、CPOL=High / CPHA=1Edge（Mode 2）、软件 NSS、波特率预分频 8；SPI1 不使用 DMA 和中断。
 4. `spi.c` 的 MspInit 只配置 PB5/PG9/PG11 三根 SPI1 引脚，不碰 PA4（PA4 由 `ad9833.c` 配成 GPIO 输出）。
-5. `main.c` 的 USER CODE 区在 `MX_SPI1_Init()` 之后调用 `AD9833_Init()`，失败报 E19。
+5. `main.c` 的 USER CODE 区在 `MX_SPI1_Init()` 之后调用 `AD9833_Init()`，失败报 E13。
 6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Freq_PlanGet()`/`Freq_SourceSet()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
 8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发，ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`。**注意双 ADC 同步模式在 `.ioc` 里没有对应选项**，重新生成会把 `adc.c` 的 `multimode.Mode` 改回 `ADC_MODE_INDEPENDENT`，要按第 10 条手工改回来。
@@ -451,4 +451,4 @@ Table 15（`OPBITEN=1` 时决定 VOUT）：`DIV2=0` 输出 DAC MSB/2（方波频
 
 ### 12.5 与扫描计划的配合
 
-`Freq_SourceSet(f)`（`measure.c` 第 1 节）内部调用 `AD9833_SetFrequency(f)`，`f` 就是 `Freq_PlanGet()` 返回的表值，SPI 写失败时报 E19。DFT 的旋转因子用的是同一张表，两者必须严格一致。
+`Freq_SourceSet(f)`（`measure.c` 第 1 节）内部调用 `AD9833_SetFrequency(f)`，`f` 就是 `Freq_PlanGet()` 返回的表值，SPI 写失败时报 E13。DFT 的旋转因子用的是同一张表，两者必须严格一致。

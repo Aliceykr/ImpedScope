@@ -9,13 +9,13 @@
 #include "screen.h"
 #include "tim.h"
 
-/* 这三个常数原来分散在 adc_sampler.c / circuit_id.c / calib.c,合并后集中定义。 */
+/* 三个 π 常数集中在此定义。 */
 #define MEASURE_PI         3.14159265358979323846
 #define MEASURE_TWO_PI     6.283185307179586
 #define MEASURE_LOG_GUARD  1e-20
 
 /* ==========================================================================
- * 1. 频率扫描计划(原 freq_plan.c)
+ * 1. 频率扫描计划
  * ========================================================================== */
 
 /*
@@ -40,7 +40,7 @@ void Freq_SourceSet(uint32_t frequency_hz)
 
     if (AD9833_SetFrequency(frequency_hz) == 0u)
     {
-        Screen_ReportError(SCREEN_E19_AD9833_SPI);
+        Screen_ReportError(SCREEN_E13_AD9833_SPI);
     }
 }
 
@@ -55,7 +55,7 @@ uint32_t Freq_PlanGet(uint8_t index)
 }
 
 /* ==========================================================================
- * 2. ADC 采样与单频 DFT(原 adc_sampler.c)
+ * 2. ADC 采样与单频 DFT
  * ========================================================================== */
 
 /* 双 ADC 同步模式下，DMA 的一个字就是一对采样点：
@@ -69,8 +69,7 @@ static uint32_t adc_pair_buf[2u * ADC_SAMPLER_PAIRS_PER_HALF];
 #define ADC_PAIR_UO(word)   ((uint16_t)(((uint32_t)(word) >> 16) & 0xFFFFu))
 
 /* 窗口累加器。两路共用一份权重和一份块序号，所以合在一个结构里：
- * 硬件保证同一个字里的 Ui、Uo 来自同一采样时刻，不存在跨路对齐问题。
- * （独立模式下两路各自触发、各自计数，还得取较大块序号来对齐，已不再需要。） */
+ * 硬件保证同一个字里的 Ui、Uo 来自同一采样时刻，不存在跨路对齐问题。 */
 typedef struct
 {
     uint32_t blocks;        /* 已处理的块数，即下一个块的序号 */
@@ -320,7 +319,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 }
 
 /* ==========================================================================
- * 3. 两路标定(原 calib.c)
+ * 3. 两路标定
  * ========================================================================== */
 
 /*
@@ -447,7 +446,7 @@ static uint8_t Calib_Apply(float frequency_hz, double *h_re, double *h_im)
 }
 
 /* ==========================================================================
- * 4. 传递函数 / 阻抗 / 导纳(原 circuit_id.c)
+ * 4. 传递函数 / 阻抗 / 导纳
  * ========================================================================== */
 
 static uint8_t CircuitID_IsFinite(double value);
@@ -478,20 +477,20 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
 
     if (CIR_FEEDBACK_RESISTOR_OHM <= 0.0f)
     {
-        Screen_ReportError(SCREEN_E07_CIR_CFG);
+        Screen_ReportError(SCREEN_E02_CIR_CFG);
         return 0u;
     }
 
     if ((input->frequency_hz == 0u) || (input->sample_count == 0u))
     {
-        Screen_ReportError(SCREEN_E07_CIR_CFG);
+        Screen_ReportError(SCREEN_E02_CIR_CFG);
         return 0u;
     }
 
     if (!CircuitID_IsFinite(input->ui_re) || !CircuitID_IsFinite(input->ui_im) ||
         !CircuitID_IsFinite(input->uo_re) || !CircuitID_IsFinite(input->uo_im))
     {
-        Screen_ReportError(SCREEN_E08_CIR_NAN_IN);
+        Screen_ReportError(SCREEN_E03_CIR_NAN_IN);
         return 0u;
     }
 
@@ -502,13 +501,13 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
 
     if (ui_mag < (double)CIR_INPUT_MIN_AMP)
     {
-        Screen_ReportError(SCREEN_E09_CIR_UI_LOW);
+        Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
         return 0u;
     }
 
     if (uo_mag < (double)CIR_OUTPUT_MIN_AMP)
     {
-        Screen_ReportError(SCREEN_E10_CIR_UO_LOW);
+        Screen_ReportError(SCREEN_E05_CIR_UO_LOW);
         return 0u;
     }
 
@@ -525,7 +524,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     if (!CircuitID_IsFinite(h_re) || !CircuitID_IsFinite(h_im) ||
         !CircuitID_IsFinite(h_magnitude_squared))
     {
-        Screen_ReportError(SCREEN_E11_CIR_H_NAN);
+        Screen_ReportError(SCREEN_E06_CIR_H_NAN);
         return 0u;
     }
 
@@ -539,7 +538,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
         !CircuitID_IsFinite(output->h_magnitude_dB) ||
         !CircuitID_IsFinite(output->h_phase_deg))
     {
-        Screen_ReportError(SCREEN_E12_CIR_OUT_NAN);
+        Screen_ReportError(SCREEN_E07_CIR_OUT_NAN);
         (void)memset(output, 0, sizeof(*output));
         return 0u;
     }
@@ -548,7 +547,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     /* H 过小表示阻抗趋于无穷，结果不可靠。 */
     if (h_magnitude_squared <= ((double)CIR_H_MIN_MAG * (double)CIR_H_MIN_MAG))
     {
-        Screen_ReportError(SCREEN_E13_CIR_H_LOW);
+        Screen_ReportError(SCREEN_E08_CIR_H_LOW);
         (void)memset(output, 0, sizeof(*output));
         return 0u;
     }
@@ -594,7 +593,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
         !CircuitID_IsFinite(output->y_conductance_siemens) ||
         !CircuitID_IsFinite(output->y_susceptance_siemens))
     {
-        Screen_ReportError(SCREEN_E14_CIR_ZY_NAN);
+        Screen_ReportError(SCREEN_E09_CIR_ZY_NAN);
         (void)memset(output, 0, sizeof(*output));
         return 0u;
     }
@@ -610,3 +609,4 @@ static uint8_t CircuitID_IsFinite(double value)
                      (value <= DBL_MAX) &&
                      (value >= -DBL_MAX));
 }
+

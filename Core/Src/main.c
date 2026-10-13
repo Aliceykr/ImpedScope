@@ -118,10 +118,10 @@ int main(void)
 
   /* 激励源:AD9833 挂在 SPI1(主机)上,FSYNC 由 ad9833.c 手动控制。必须在
    * MX_SPI1_Init() 之后调用。初始化失败不致命,但之后测不到有效频响,
-   * 所以计入 E19 供串口屏显示。 */
+   * 所以计入 E13 供串口屏显示。 */
   if (AD9833_Init() == 0u)
   {
-    Screen_ReportError(SCREEN_E19_AD9833_SPI);
+    Screen_ReportError(SCREEN_E13_AD9833_SPI);
   }
 
   CircuitID_Init();
@@ -168,7 +168,7 @@ int main(void)
 
       if (got == 0u)
       {
-        Screen_ReportError(SCREEN_E18_WINDOW_TIMEOUT);
+        Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
         Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
         continue;
       }
@@ -339,3 +339,4 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
