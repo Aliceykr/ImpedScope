@@ -567,8 +567,13 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     ui_coh = CircuitID_Coherence(ui_mag, input->ui_rms);
     uo_coh = CircuitID_Coherence(uo_mag, input->uo_rms);
 
-    /* 先送到串口屏（t7、t8），这样失败时也能看到两路幅值与相干性。 */
-    (void)Screen_SetDebug((float)ui_mag, (float)uo_mag, (float)ui_coh, (float)uo_coh);
+    /* 先送到串口屏（t7、t8），这样失败时也能看到两路电压与相干性。
+     * 送的是去直流后的交流有效值（RMS，单位 V），可直接与万用表、示波器的读数对照；
+     * 单频分量的峰值约等于它的 sqrt(2) 倍（相干性接近 1 时该关系成立）。
+     * 门限 CIR_INPUT_MIN_AMP / CIR_OUTPUT_MIN_AMP 用的仍是峰值码值，不在这里换算。 */
+    (void)Screen_SetDebug((float)(input->ui_rms * ADC_SAMPLER_LSB_TO_V),
+                          (float)(input->uo_rms * ADC_SAMPLER_LSB_TO_V),
+                          (float)ui_coh, (float)uo_coh);
 
     if (ui_coh < (double)CIR_MIN_COHERENCE)
     {

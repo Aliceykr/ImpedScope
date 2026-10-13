@@ -44,10 +44,10 @@ void Screen_Init(void);
 /* 保存最近一个有效频点的计算结果，下次刷新时显示。 */
 void Screen_SetResult(const FRF_Point_t *result);
 
-/* 保存最近一个窗口的诊断量（两路单频幅值、两路相干性），与计算结果是否有效无关：
- * 计算失败时（正是"没有信号"的情况）t7、t8 仍能显示幅值，否则屏幕上只剩一个错误码。
- * 幅值单位是 ADC 码值，相干性 1.0 表示纯单频。 */
-void Screen_SetDebug(float ui_mag_lsb, float uo_mag_lsb, float ui_coherence, float uo_coherence);
+/* 保存最近一个窗口的诊断量（两路交流有效值、两路相干性），与计算结果是否有效无关：
+ * 计算失败时（正是"没有信号"的情况）t7、t8 仍能显示电压，否则屏幕上只剩一个错误码。
+ * 电压单位 V（去直流后的交流有效值），相干性是无量纲的 0~1，1.0 表示纯单频。 */
+void Screen_SetDebug(float ui_volt, float uo_volt, float ui_coherence, float uo_coherence);
 
 /* 清除已保存的结果,下一次刷新时 t0~t4 显示 "-"。用于失败/超时路径,避免显示陈旧读数。 */
 void Screen_ClearResult(void);

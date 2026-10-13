@@ -43,7 +43,7 @@ static uint8_t s_tx_buffer[SCREEN_TX_BUFFER_BYTES];
 static FRF_Point_t s_result;
 static uint8_t s_has_result;
 static uint8_t s_has_debug;
-static float   s_debug[4];      /* Ui 幅值、Uo 幅值、Ui 相干性、Uo 相干性 */
+static float   s_debug[4];      /* Ui 电压、Uo 电压（V）、Ui 相干性、Uo 相干性 */
 static uint32_t s_last_tick;
 static uint32_t s_beat;
 static char s_stage[SCREEN_STAGE_CHARS];
@@ -92,10 +92,10 @@ void Screen_ClearResult(void)
     s_has_result = 0u;
 }
 
-void Screen_SetDebug(float ui_mag_lsb, float uo_mag_lsb, float ui_coherence, float uo_coherence)
+void Screen_SetDebug(float ui_volt, float uo_volt, float ui_coherence, float uo_coherence)
 {
-    s_debug[0] = ui_mag_lsb;
-    s_debug[1] = uo_mag_lsb;
+    s_debug[0] = ui_volt;
+    s_debug[1] = uo_volt;
     s_debug[2] = ui_coherence;
     s_debug[3] = uo_coherence;
     s_has_debug = 1u;
@@ -344,13 +344,13 @@ static uint16_t Screen_BuildCommands(void)
     }
     length = Screen_AppendCommand(length, "t4", value);
 
-    /* t7、t8:窗口诊断量（幅值单位 ADC 码值，c 为相干性）。计算失败时也会更新，
-     * 所以"没信号"时这里能看到两路本底有多大、相干性有多低。 */
+    /* t7、t8:窗口诊断量（电压单位 V，k 为相干性）。计算失败时也会更新，所以"没信号"
+     * 时这里能看到两路本底电压有多大、相干性有多低。 */
     if (s_has_debug != 0u)
     {
-        (void)snprintf(value, sizeof(value), "Ui:%.2f c:%.2f", (double)s_debug[0], (double)s_debug[2]);
+        (void)snprintf(value, sizeof(value), "Ui:%.4fV k:%.2f", (double)s_debug[0], (double)s_debug[2]);
         length = Screen_AppendCommand(length, "t7", value);
-        (void)snprintf(value, sizeof(value), "Uo:%.2f c:%.2f", (double)s_debug[1], (double)s_debug[3]);
+        (void)snprintf(value, sizeof(value), "Uo:%.4fV k:%.2f", (double)s_debug[1], (double)s_debug[3]);
         length = Screen_AppendCommand(length, "t8", value);
     }
     else

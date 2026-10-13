@@ -95,8 +95,23 @@ uint32_t Freq_PlanGet(uint8_t index);
 #define ADC_SAMPLER_WINDOW_MIN       256u
 #define ADC_SAMPLER_WINDOW_MAX       400000u
 
+/* ADC 的参考电压 VREF+，单位 V。16 位分辨率下满量程 65535 个码值对应 VREF+，
+ * 所以 电压 = 码值 * VREF+ / 65535。
+ *
+ * 本工程按 VREF+ = VDDA = 3.3 V 计算，**必须与实际接线一致**：如果板上 VREF+ 由
+ * 独立基准（例如 2.5 V）驱动，或 VDDA 不是 3.3 V，就改这里，否则 t7、t8 显示的
+ * 电压会整体差一个固定比例。这个比例不影响 H、Z、Y（它们都是两路之比或对 R 的
+ * 比值），只影响"屏幕上的电压是不是真值"。
+ * 校验方法：在 PA0_C 上加一个已知直流电压，看 t7 的读数是否成比例。 */
+#define ADC_SAMPLER_VREF_V           3.3f
+
+/* ADC 码值 → 伏特。只用于 t7、t8 显示，不参与 H、Z、Y 的计算。 */
+#define ADC_SAMPLER_LSB_TO_V         ((double)ADC_SAMPLER_VREF_V / 65535.0)
+
 /* 一个窗口的单频 DFT 结果。
- * 幅值换算:|U| = 2 * sqrt(re^2 + im^2) / sample_count,单位为 ADC 码值。
+ * 幅值换算:|U| = 2 * sqrt(re^2 + im^2) / sample_count,单位为 ADC 码值;
+ * 换成电压用 ADC_SAMPLER_LSB_TO_V(= VREF+ / 65535)。
+ * 该幅值是单频分量的峰值,其 1/sqrt(2) 即该分量的有效值。
  * 两路使用同一个 sample_count,所以 H = Uo / Ui 与归一化无关。
  *
  * ui_rms / uo_rms 是去掉直流后的交流有效值,只用于判断窗口里到底有没有单频信号
