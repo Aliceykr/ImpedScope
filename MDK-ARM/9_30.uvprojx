@@ -10,7 +10,7 @@
       <TargetName>9_30</TargetName>
       <ToolsetNumber>0x4</ToolsetNumber>
       <ToolsetName>ARM-ADS</ToolsetName>
-      <pArmCC>6230000::V6.23::ARMCLANG</pArmCC>
+      <pArmCC>6240000::V6.24::ARMCLANG</pArmCC>
       <pCCUsed>5060960::V5.06 update 7 (build 960)::.\ARMCC</pCCUsed>
       <uAC6>1</uAC6>
       <TargetOption>
@@ -599,34 +599,14 @@
           <GroupName>Application/User/USE</GroupName>
           <Files>
             <File>
-              <FileName>spi_receiver.c</FileName>
+              <FileName>measure.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../USE/spi_receiver.c</FilePath>
-            </File>
-            <File>
-              <FileName>circuit_id.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../USE/circuit_id.c</FilePath>
+              <FilePath>../USE/measure.c</FilePath>
             </File>
             <File>
               <FileName>screen.c</FileName>
               <FileType>1</FileType>
               <FilePath>../USE/screen.c</FilePath>
-            </File>
-            <File>
-              <FileName>adc_sampler.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../USE/adc_sampler.c</FilePath>
-            </File>
-            <File>
-              <FileName>calib.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../USE/calib.c</FilePath>
-            </File>
-            <File>
-              <FileName>freq_plan.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../USE/freq_plan.c</FilePath>
             </File>
           </Files>
         </Group>

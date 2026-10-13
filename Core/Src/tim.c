@@ -42,7 +42,7 @@ void MX_TIM6_Init(void)
   htim6.Instance = TIM6;
   /* APB1 = 60 MHz, prescaler != 1 so the APB1 timer clock is doubled: 120 MHz.
    * 120 MHz / (3+1) / (99+1) = 300 kHz.  Keep this in step with
-   * ADC_SAMPLER_RATE_HZ in adc_sampler.h: this sets the hardware ADC trigger
+   * ADC_SAMPLER_RATE_HZ in measure.h: this sets the hardware ADC trigger
    * rate, that one is the software DFT frequency axis. */
   htim6.Init.Prescaler = 3;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;

@@ -7,43 +7,38 @@ extern "C" {
 
 #include "main.h"
 #include "usart.h"
-#include "circuit_id.h"
+#include "measure.h"
 
 /* 串口屏刷新周期。 */
 #define SCREEN_REFRESH_PERIOD_MS     500u
 
-/* 1：通信测试界面（t0~t2 为 SPI 收包计数，t4 为最近原始帧）；
- * 0：正常显示频响结果。 */
-/* 0:正常显示频响结果(|Y| / phiY / G / B,7 个文本框 t0~t6)。
- * 1:通信测试界面(旧的 SPI 收包计数),FPGA 方案已废弃,保留仅供调试。 */
-#define SCREEN_SPI_TEST              0u
-
 /*
- * 错误码，说明见 README.md 第 8.3 节。0 保留表示"无错误"。
+ * 错误码，说明见 README.md 第 8.2 节。0 保留表示"无错误"。
  *
  * E01 是默认致命码：CubeMX 生成的 MX_*_Init() 内部直接调用
  * Error_Handler()，无法区分具体外设，统一显示 E01 HAL_INIT。
- * E04、E05 在 16 字节定点帧方案中已弃用，保留编号占位。
+ * E02~E06、E17 属于已删除的 SPI 频率帧接收路径（原 USE/spi_receiver.c），
+ * 保留编号占位，当前没有任何代码会上报它们。
  */
 typedef enum
 {
     SCREEN_E01_HAL_INIT   = 1u,   /* MX_*_Init 内 Error_Handler，致命，默认码 */
-    SCREEN_E02_SPI_DMA    = 2u,   /* DMA 启动失败致命；CS 下降沿 DMA 未 armed 也报此码（非致命路径） */
-    SCREEN_E03_SPI_FRAME  = 3u,   /* 帧头帧尾错、短帧、index 越界或两 bin 不一致，非致命 */
-    SCREEN_E04_SPI_NAN    = 4u,   /* 已弃用（定点帧无浮点），保留编号 */
-    SCREEN_E05_SPI_LEN    = 5u,   /* 已弃用（不再解析 float），保留编号 */
-    SCREEN_E06_SPI_QFULL  = 6u,   /* 接收队列满丢点，非致命              */
-    SCREEN_E07_CIR_CFG    = 7u,   /* R<=0 或 bin==0，非致命             */
-    SCREEN_E08_CIR_NAN_IN = 8u,   /* 输入（含比例换算后）非有限，非致命  */
-    SCREEN_E09_CIR_UI_LOW = 9u,   /* |Ui| 过小，非致命                   */
-    SCREEN_E10_CIR_UO_LOW = 10u,  /* |Uo| 过小，非致命                   */
-    SCREEN_E11_CIR_H_NAN  = 11u,  /* H 非有限，非致命                    */
-    SCREEN_E12_CIR_OUT_NAN= 12u,  /* 频响输出非有限，非致命              */
-    SCREEN_E13_CIR_H_LOW  = 13u,  /* |H| 过小无法算 Z，非致命            */
-    SCREEN_E14_CIR_ZY_NAN = 14u,  /* Z/Y 非有限，非致命                  */
-    SCREEN_E15_UART_TX    = 15u,  /* Transmit_IT 返回非 OK，非致命       */
-    SCREEN_E16_UART_BUSY  = 16u,  /* 上一条未发完本周期跳过，非致命      */
-    SCREEN_E17_BIN_MISMATCH = 17u, /* 两通道峰值 bin 不一致，非致命       */
+    SCREEN_E02_SPI_DMA    = 2u,   /* 已弃用（SPI 接收路径已删除），保留编号 */
+    SCREEN_E03_SPI_FRAME  = 3u,   /* 已弃用（SPI 接收路径已删除），保留编号 */
+    SCREEN_E04_SPI_NAN    = 4u,   /* 已弃用（定点帧无浮点），保留编号        */
+    SCREEN_E05_SPI_LEN    = 5u,   /* 已弃用（不再解析 float），保留编号      */
+    SCREEN_E06_SPI_QFULL  = 6u,   /* 已弃用（SPI 接收路径已删除），保留编号 */
+    SCREEN_E07_CIR_CFG    = 7u,   /* R<=0、频率为 0 或窗口为空，非致命      */
+    SCREEN_E08_CIR_NAN_IN = 8u,   /* 输入（含比例换算后）非有限，非致命    */
+    SCREEN_E09_CIR_UI_LOW = 9u,   /* |Ui| 过小，非致命                     */
+    SCREEN_E10_CIR_UO_LOW = 10u,  /* |Uo| 过小，非致命                     */
+    SCREEN_E11_CIR_H_NAN  = 11u,  /* H 非有限，非致命                      */
+    SCREEN_E12_CIR_OUT_NAN= 12u,  /* 频响输出非有限，非致命                */
+    SCREEN_E13_CIR_H_LOW  = 13u,  /* |H| 过小无法算 Z，非致命              */
+    SCREEN_E14_CIR_ZY_NAN = 14u,  /* Z/Y 非有限，非致命                    */
+    SCREEN_E15_UART_TX    = 15u,  /* Transmit_IT 返回非 OK，非致命         */
+    SCREEN_E16_UART_BUSY  = 16u,  /* 上一条未发完本周期跳过，非致命        */
+    SCREEN_E17_BIN_MISMATCH = 17u, /* 已弃用（旧的峰值 bin 协议），保留编号 */
     SCREEN_E18_WINDOW_TIMEOUT = 18u, /* 等待 ADC 窗口完成超时,非致命 */
     SCREEN_ERROR_CODE_MAX = 18u
 } Screen_ErrorCode_t;

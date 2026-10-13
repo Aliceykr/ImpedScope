@@ -27,10 +27,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "circuit_id.h"
+#include "measure.h"
 #include "screen.h"
-#include "adc_sampler.h"
-#include "freq_plan.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -119,9 +117,10 @@ int main(void)
   CircuitID_Init();
   Screen_SetStage("MODULE");
 
-  /* 频率源已改为内部扫描计划(freq_plan),原 SPI1 从机接收(FPGA 方案)废弃。
-   * MX_SPI1_Init() 仍会使能 EXTI4(PA4/CS),这里关掉:否则 PA4 悬空时,
-   * spi_receiver.c 的 EXTI 回调会持续误报 E02 SPI_DMA 并反复重装 DMA。 */
+  /* 频率源为内部扫描计划(measure.c 第 1 节),原 FPGA 经 SPI1 从机下发频率帧的
+   * 方案连同 spi_receiver.c 一并删除。MX_SPI1_Init() 仍会使能 EXTI4(PA4/CS),
+   * 这里关掉,避免 PA4 悬空时边沿中断空转。SPI1 外设本身上电仍被初始化,
+   * 留作后续驱动 AD9833(改为主机模式)复用。 */
   HAL_NVIC_DisableIRQ(EXTI4_IRQn);
 
   if (ADC_Sampler_Init() == 0u)

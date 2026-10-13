@@ -3,15 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "spi_receiver.h"
-
 /* 指令格式：控件名.txt="值" + 0xFF 0xFF 0xFF。 */
 #define SCREEN_CMD_END_BYTE          0xFFu
 #define SCREEN_CMD_END_COUNT         3u
 #define SCREEN_TX_BUFFER_BYTES        256u
 #define SCREEN_VALUE_CHARS           40u
 #define SCREEN_STAGE_CHARS           16u
-#define SCREEN_BLOCKING_TIMEOUT_MS   100u   /* 9600bps 下一条 t4 约 30ms */
+#define SCREEN_BLOCKING_TIMEOUT_MS   100u   /* 9600bps 下一条 t5 约 30ms */
 #define SCREEN_STAGE_HOLD_MS         150u   /* 启动阶段肉眼保持时间 */
 
 /* 致命路径有界轮询的上限。关中断后 SysTick 已停,HAL 的 tick 超时失效
@@ -60,8 +58,8 @@ static volatile uint8_t  s_uart_ready;
 
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
-static void Screen_SendT4Blocking(const char *value, uint32_t timeout);
-static void Screen_SendT4Raw(const char *value);
+static void Screen_SendStatusBlocking(const char *value, uint32_t timeout);
+static void Screen_SendStatusRaw(const char *value);
 
 void Screen_Init(void)
 {
@@ -115,7 +113,7 @@ void Screen_SetStage(const char *stage)
     if (s_uart_ready != 0u)
     {
         (void)snprintf(value, sizeof(value), "stage:%s", s_stage);
-        Screen_SendT4Blocking(value, SCREEN_BLOCKING_TIMEOUT_MS);
+        Screen_SendStatusBlocking(value, SCREEN_BLOCKING_TIMEOUT_MS);
         HAL_Delay(SCREEN_STAGE_HOLD_MS);
     }
 }
@@ -156,14 +154,14 @@ void Screen_FatalReportBlocking(void)
     /* 关中断、SysTick 已停：tick 超时不可用，改用有界轮询。 */
     (void)snprintf(value, sizeof(value), "stage:E%02d %s",
                    (unsigned)s_fatal_code, s_error_names[s_fatal_code]);
-    Screen_SendT4Raw(value);
+    Screen_SendStatusRaw(value);
 }
 
 /* 致命路径专用的阻塞发送:不 abort、不依赖 HAL 状态与 SysTick。
  * 停掉可能在跑的 IT/DMA 发送请求,清标志,再按计数器有界等待 TXE/TC。
  * 关中断后 SysTick 已停:HAL_MAX_DELAY 永不超时,有限超时也永不
  * 到期(GetTick 差恒为 0),所以必须绕开 HAL 的 tick 超时机制。 */
-static void Screen_SendT4Raw(const char *value)
+static void Screen_SendStatusRaw(const char *value)
 {
     uint16_t length = 0u;
     uint16_t remaining;
@@ -212,8 +210,8 @@ static void Screen_SendT4Raw(const char *value)
     huart4.TxXferCount = 0u;
 }
 
-/* 阻塞发送一条 t4 指令；发送前 abort 残留的 IT 传输。 */
-static void Screen_SendT4Blocking(const char *value, uint32_t timeout)
+/* 阻塞发送一条 t5 指令；发送前 abort 残留的 IT 传输。 */
+static void Screen_SendStatusBlocking(const char *value, uint32_t timeout)
 {
     uint16_t length = 0u;
 
@@ -277,26 +275,8 @@ static uint16_t Screen_BuildCommands(void)
 {
     char value[SCREEN_VALUE_CHARS];
     uint16_t length = 0u;
-#if SCREEN_SPI_TEST == 1u
-    SPI_Stats_t stats;
-    uint8_t     index;
-
-    SPI_Receiver_GetStats(&stats);
-#else
     uint8_t code;
-#endif
 
-#if SCREEN_SPI_TEST == 1u
-    /* 测试模式：t0~t2 显示收包计数，用于判断 CS、字节数和帧头是否正确。 */
-    (void)snprintf(value, sizeof(value), "cs:%lu", (unsigned long)stats.cs_falling);
-    length = Screen_AppendCommand(length, "t0", value);
-
-    (void)snprintf(value, sizeof(value), "full:%lu", (unsigned long)stats.frame_full);
-    length = Screen_AppendCommand(length, "t1", value);
-
-    (void)snprintf(value, sizeof(value), "hdr:%lu", (unsigned long)stats.frame_ok);
-    length = Screen_AppendCommand(length, "t2", value);
-#else
     /* t0:频率 (Hz)。|Y|、G、B 存储单位是 S,串口屏显示 mS,故均 x1000。 */
     if (s_has_result != 0u)
     {
@@ -330,7 +310,6 @@ static uint16_t Screen_BuildCommands(void)
         (void)snprintf(value, sizeof(value), "P:-");
     }
     length = Screen_AppendCommand(length, "t2", value);
-#endif
 
     /* t3:G = Re[Y] (mS) */
     if (s_has_result != 0u)
@@ -360,16 +339,7 @@ static uint16_t Screen_BuildCommands(void)
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
     length = Screen_AppendCommand(length, "t6", value);
 
-#if SCREEN_SPI_TEST == 1u
-    /* t5:最近一次收满的原始帧,格式 raw:十六进制(8 字节) */
-    (void)snprintf(value, sizeof(value), "raw:");
-    for (index = 0u; index < SPI_FRAME_TOTAL_BYTES; ++index)
-    {
-        (void)snprintf(&value[4u + ((uint16_t)index * 2u)], 3u, "%02X",
-                       (unsigned)stats.last_frame[index]);
-    }
-#else
-    /* t5:阶段或最近一次错误(原 t4;t4 已改作 B 读数) */
+    /* t5:阶段或最近一次错误(t4 已改作 B 读数) */
     if (s_fatal_latched != 0u)
     {
         (void)snprintf(value, sizeof(value), "stage:E%02d %s",
@@ -389,7 +359,6 @@ static uint16_t Screen_BuildCommands(void)
             (void)snprintf(value, sizeof(value), "stage:%s", s_stage);
         }
     }
-#endif
     length = Screen_AppendCommand(length, "t5", value);
 
     return length;
