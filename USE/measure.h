@@ -15,7 +15,8 @@ extern "C" {
  *   Freq_PlanGet(k)                 取第 k 个扫描频率
  *     -> Freq_SourceSet(f)          设定 AD9833(SPI1 主机,见 USE/ad9833.c)
  *     -> ADC_Sampler_SetFrequency(f)  开一个采样窗口
- *          两个 ADC 各自单通道,由同一个 TIM6 TRGO 触发,DMA 循环写入缓冲区;
+ *          ADC1 为主、ADC2 为从的硬件同步采样,由 TIM6 TRGO 触发,一对结果打包进
+ *          CDR,由 ADC1 的 DMA 循环写入缓冲区;
  *          窗口内对两路做该频率的单频 DFT,得到 Ui、Uo 的复数分量
  *     -> ADC_Sampler_GetWindow()    取出窗口结果
  *     -> CircuitID_Compute()        算 H、Z、Y,并做两路标定修正
@@ -49,13 +50,20 @@ uint32_t Freq_PlanGet(uint8_t index);
  * ========================================================================== */
 
 /*
- * 两个 ADC 各自单通道,由同一个 TIM6 TRGO 触发,DMA 循环写入各自的缓冲区。
+ * ADC1(主) 与 ADC2(从) 工作在双 ADC 规则组同步模式(ADC_DUALMODE_REGSIMULT):
  *   ADC1,PA0_C(ADC1_INP0):DUT 电压 Ui
  *   ADC2,PA1_C(ADC2_INP1):电流转换后的电压 Uo
  *
+ * 一次 TIM6 TRGO 让两路在同一时刻开始采样(不再是"两路各自被同一个触发沿启动",
+ * 那种方式两路之间还有几百纳秒的采样时刻偏差)。一对结果打包进公共数据寄存器
+ * CDR 的一个 32 位字:
+ *   bit[15:0]  = ADC1（主）= Ui
+ *   bit[31:16] = ADC2（从）= Uo
+ * 只由 ADC1 的 DMA(DMA1_Stream2,按字搬运)循环写入缓冲区,从 ADC 不使用 DMA。
+ *
  * 每设一个新频率就开始一个窗口:在两路上做该频率的单频 DFT,窗口结束后得到
  * Ui、Uo 的复数分量,交给 CircuitID_Compute() 计算 H、Z、Y。
- * 两路由同一 DMA 块边界开始累加,样本严格对齐。
+ * 两个字段来自同一次采样,故两路累加时共用同一个权重和同一个块序号,不存在对齐问题。
  */
 
 /* TIM6 触发频率:APB1 定时器时钟 120 MHz(APB1 = 60 MHz,分频不为 1 故定时器时钟加倍),
@@ -102,7 +110,7 @@ typedef struct
     double   uo_im;
 } ADC_Window_t;
 
-/* 校准并启动两路 DMA,再启动 TIM6;成功返回 1,失败返回 0。 */
+/* 校准两路 ADC,再启动双 ADC 同步转换(只用主 ADC 的 DMA),最后启动 TIM6;成功返回 1,失败返回 0。 */
 uint8_t ADC_Sampler_Init(void);
 
 /* 设定当前频率并开始新窗口。频率相同则不重启;频率非法返回 0。 */

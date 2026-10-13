@@ -58,28 +58,38 @@ uint32_t Freq_PlanGet(uint8_t index)
  * 2. ADC 采样与单频 DFT(原 adc_sampler.c)
  * ========================================================================== */
 
-/* DMA 按半字（16 位）写入，缓冲区用 uint16_t。两路各一个，每路两个半区。 */
-static uint16_t adc1_buf[2u * ADC_SAMPLER_PAIRS_PER_HALF];
-static uint16_t adc2_buf[2u * ADC_SAMPLER_PAIRS_PER_HALF];
+/* 双 ADC 同步模式下，DMA 的一个字就是一对采样点：
+ *   bit[15:0]  = ADC1（主）的结果 = Ui，PA0_C / ADC1_INP0
+ *   bit[31:16] = ADC2（从）的结果 = Uo，PA1_C / ADC2_INP1
+ * 一对结果由硬件在同一时刻采样后打包进公共数据寄存器 CDR，只由 ADC1 的 DMA
+ * （DMA1_Stream2）按字搬运，所以缓冲区是 uint32_t。 */
+static uint32_t adc_pair_buf[2u * ADC_SAMPLER_PAIRS_PER_HALF];
 
-/* 单路累加器。DMA 每回调一次处理一个块，块序号两路各自计数。 */
+#define ADC_PAIR_UI(word)   ((uint16_t)((uint32_t)(word) & 0xFFFFu))
+#define ADC_PAIR_UO(word)   ((uint16_t)(((uint32_t)(word) >> 16) & 0xFFFFu))
+
+/* 窗口累加器。两路共用一份权重和一份块序号，所以合在一个结构里：
+ * 硬件保证同一个字里的 Ui、Uo 来自同一采样时刻，不存在跨路对齐问题。
+ * （独立模式下两路各自触发、各自计数，还得取较大块序号来对齐，已不再需要。） */
 typedef struct
 {
     uint32_t blocks;        /* 已处理的块数，即下一个块的序号 */
-    uint32_t start_block;   /* 本窗口起始块序号，两路相同 */
-    uint32_t count;         /* 本窗口已累计的采样点数 */
+    uint32_t start_block;   /* 本窗口起始块序号 */
+    uint32_t count;         /* 本窗口已累计的采样点数（两路相同） */
     uint8_t  done;          /* 本窗口已累计满 */
     double   rot_re;        /* 当前权重 e^{-j w n} */
     double   rot_im;
-    double   acc_re;        /* sum x * w */
-    double   acc_im;
+    double   ui_re;         /* sum Ui * w */
+    double   ui_im;
+    double   uo_re;         /* sum Uo * w */
+    double   uo_im;
     double   w_re;          /* sum w，用于去除直流 */
     double   w_im;
-    double   sum_x;         /* sum x，用于去除直流 */
+    double   ui_sum;        /* sum Ui，用于去除直流 */
+    double   uo_sum;        /* sum Uo，用于去除直流 */
 } ADC_Acc_t;
 
-static ADC_Acc_t s_acc_dut;             /* ADC1：Ui */
-static ADC_Acc_t s_acc_cur;             /* ADC2：Uo */
+static ADC_Acc_t s_acc;
 static uint32_t  s_frequency_hz;
 static uint32_t  s_target;              /* 窗口长度，0 表示尚未设定频率 */
 static double    s_step_re;             /* e^{-j w}，每采样点推进一次 */
@@ -88,8 +98,9 @@ static ADC_Window_t s_window;
 static volatile uint8_t s_ready;
 
 static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block);
-static void ADC_Sampler_Accumulate(ADC_Acc_t *acc, const uint16_t *block);
-static void ADC_Sampler_Phasor(const ADC_Acc_t *acc, double *re, double *im);
+static void ADC_Sampler_Accumulate(const uint32_t *block);
+static void ADC_Sampler_Phasor(const ADC_Acc_t *acc, double sum_x, double acc_re, double acc_im,
+                               double *re, double *im);
 static void ADC_Sampler_TryFinish(void);
 
 static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block)
@@ -99,82 +110,87 @@ static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block)
     acc->done = 0u;
     acc->rot_re = 1.0;
     acc->rot_im = 0.0;
-    acc->acc_re = 0.0;
-    acc->acc_im = 0.0;
+    acc->ui_re = 0.0;
+    acc->ui_im = 0.0;
+    acc->uo_re = 0.0;
+    acc->uo_im = 0.0;
     acc->w_re = 0.0;
     acc->w_im = 0.0;
-    acc->sum_x = 0.0;
+    acc->ui_sum = 0.0;
+    acc->uo_sum = 0.0;
 }
 
-/* 处理一个 DMA 块（ADC_SAMPLER_PAIRS_PER_HALF 个采样点）。只在 DMA 中断中调用。 */
-static void ADC_Sampler_Accumulate(ADC_Acc_t *acc, const uint16_t *block)
+/* 处理一个 DMA 块（ADC_SAMPLER_PAIRS_PER_HALF 对采样点）。只在 DMA 中断中调用。
+ * 一个字里两路的结果来自同一采样时刻，所以用同一个权重、同一个块序号。 */
+static void ADC_Sampler_Accumulate(const uint32_t *block)
 {
-    uint32_t block_index = acc->blocks;
+    uint32_t block_index = s_acc.blocks;
     uint32_t index;
 
-    acc->blocks++;
+    s_acc.blocks++;
 
     /* 无窗口、窗口尚未开始、或本窗口已满，都不累计。 */
-    if ((s_target == 0u) || (block_index < acc->start_block) || (acc->done != 0u))
+    if ((s_target == 0u) || (block_index < s_acc.start_block) || (s_acc.done != 0u))
     {
         return;
     }
 
-    for (index = 0u; (index < ADC_SAMPLER_PAIRS_PER_HALF) && (acc->count < s_target); ++index)
+    for (index = 0u; (index < ADC_SAMPLER_PAIRS_PER_HALF) && (s_acc.count < s_target); ++index)
     {
-        double x = (double)block[index];
+        double ui = (double)ADC_PAIR_UI(block[index]);
+        double uo = (double)ADC_PAIR_UO(block[index]);
         double next_re;
         double next_im;
 
-        acc->acc_re += x * acc->rot_re;
-        acc->acc_im += x * acc->rot_im;
-        acc->w_re += acc->rot_re;
-        acc->w_im += acc->rot_im;
-        acc->sum_x += x;
-        acc->count++;
+        s_acc.ui_re += ui * s_acc.rot_re;
+        s_acc.ui_im += ui * s_acc.rot_im;
+        s_acc.uo_re += uo * s_acc.rot_re;
+        s_acc.uo_im += uo * s_acc.rot_im;
+        s_acc.w_re += s_acc.rot_re;
+        s_acc.w_im += s_acc.rot_im;
+        s_acc.ui_sum += ui;
+        s_acc.uo_sum += uo;
+        s_acc.count++;
 
         /* 权重推进一个采样点：rot *= step。 */
-        next_re = (acc->rot_re * s_step_re) - (acc->rot_im * s_step_im);
-        next_im = (acc->rot_re * s_step_im) + (acc->rot_im * s_step_re);
-        acc->rot_re = next_re;
-        acc->rot_im = next_im;
+        next_re = (s_acc.rot_re * s_step_re) - (s_acc.rot_im * s_step_im);
+        next_im = (s_acc.rot_re * s_step_im) + (s_acc.rot_im * s_step_re);
+        s_acc.rot_re = next_re;
+        s_acc.rot_im = next_im;
     }
 
-    if (acc->count >= s_target)
+    if (s_acc.count >= s_target)
     {
-        acc->done = 1u;
+        s_acc.done = 1u;
     }
 }
 
 /* 去直流后的单频分量：S = sum (x - mean) * w。 */
-static void ADC_Sampler_Phasor(const ADC_Acc_t *acc, double *re, double *im)
+static void ADC_Sampler_Phasor(const ADC_Acc_t *acc, double sum_x, double acc_re, double acc_im,
+                               double *re, double *im)
 {
-    double mean = acc->sum_x / (double)acc->count;
+    double mean = sum_x / (double)acc->count;
 
-    *re = acc->acc_re - (mean * acc->w_re);
-    *im = acc->acc_im - (mean * acc->w_im);
+    *re = acc_re - (mean * acc->w_re);
+    *im = acc_im - (mean * acc->w_im);
 }
 
-/* 两路都累计满时，写出结果并立即开始下一个窗口。 */
+/* 窗口累计满时，写出结果并立即开始下一个窗口。 */
 static void ADC_Sampler_TryFinish(void)
 {
-    uint32_t next_start;
-
-    if ((s_acc_dut.done == 0u) || (s_acc_cur.done == 0u))
+    if (s_acc.done == 0u)
     {
         return;
     }
 
     s_window.frequency_hz = s_frequency_hz;
     s_window.sample_count = s_target;
-    ADC_Sampler_Phasor(&s_acc_dut, &s_window.ui_re, &s_window.ui_im);
-    ADC_Sampler_Phasor(&s_acc_cur, &s_window.uo_re, &s_window.uo_im);
+    ADC_Sampler_Phasor(&s_acc, s_acc.ui_sum, s_acc.ui_re, s_acc.ui_im, &s_window.ui_re, &s_window.ui_im);
+    ADC_Sampler_Phasor(&s_acc, s_acc.uo_sum, s_acc.uo_re, s_acc.uo_im, &s_window.uo_re, &s_window.uo_im);
     s_ready = 1u;
 
-    /* 下一窗口从两路中较靠后的块开始，保证两路起点相同。 */
-    next_start = (s_acc_dut.blocks > s_acc_cur.blocks) ? s_acc_dut.blocks : s_acc_cur.blocks;
-    ADC_Sampler_ResetAcc(&s_acc_dut, next_start);
-    ADC_Sampler_ResetAcc(&s_acc_cur, next_start);
+    /* 下一窗口从本窗口结束后的下一个块开始：两路共用一个块序号，起点天然一致。 */
+    ADC_Sampler_ResetAcc(&s_acc, s_acc.blocks);
 }
 
 uint8_t ADC_Sampler_Init(void)
@@ -189,12 +205,12 @@ uint8_t ADC_Sampler_Init(void)
         return 0u;
     }
 
-    /* HAL 要求 pData 为 uint32_t*，实际按半字读写。两路 DMA 都要先装载，再启动定时器。 */
-    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc1_buf, 2u * ADC_SAMPLER_PAIRS_PER_HALF) != HAL_OK)
-    {
-        return 0u;
-    }
-    if (HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc2_buf, 2u * ADC_SAMPLER_PAIRS_PER_HALF) != HAL_OK)
+    /* 双 ADC 同步模式：一次 TIM6 TRGO 让 ADC1（主）和 ADC2（从）在同一时刻开始转换，
+     * 一对结果打包在公共数据寄存器 CDR 里，由 ADC1 的 DMA 按字搬进 adc_pair_buf。
+     * 只能用主 ADC 的句柄调用；从 ADC 的 DMA 在同步模式下不使用（其配置保留在
+     * Core/Src/adc.c 里，只有切回独立模式时才会用到）。
+     * 必须在两路都校准之后再调用：校准会先把 ADC 关掉。 */
+    if (HAL_ADCEx_MultiModeStart_DMA(&hadc1, adc_pair_buf, 2u * ADC_SAMPLER_PAIRS_PER_HALF) != HAL_OK)
     {
         return 0u;
     }
@@ -246,15 +262,14 @@ uint8_t ADC_Sampler_SetFrequency(uint32_t frequency_hz)
     primask = __get_PRIMASK();
     __disable_irq();
 
-    /* 两路的 blocks 相差不超过一个块，取较大值作为共同起点。 */
-    start = (s_acc_dut.blocks > s_acc_cur.blocks) ? s_acc_dut.blocks : s_acc_cur.blocks;
+    /* 同步模式下两路共用一个块序号，当前块序号就是下一个窗口的起点。 */
+    start = s_acc.blocks;
     s_frequency_hz = frequency_hz;
     s_target = target;
     s_step_re = step_re;
     s_step_im = step_im;
     s_ready = 0u;
-    ADC_Sampler_ResetAcc(&s_acc_dut, start);
-    ADC_Sampler_ResetAcc(&s_acc_cur, start);
+    ADC_Sampler_ResetAcc(&s_acc, start);
 
     __set_PRIMASK(primask);
 
@@ -284,16 +299,12 @@ uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out)
     return ready;
 }
 
-/* 前半块填满：DUT 为 ADC1，电流为 ADC2。 */
+/* 前半块填满。同步模式下只有主 ADC（ADC1）的 DMA 在跑。 */
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        ADC_Sampler_Accumulate(&s_acc_dut, &adc1_buf[0]);
-    }
-    else if (hadc->Instance == ADC2)
-    {
-        ADC_Sampler_Accumulate(&s_acc_cur, &adc2_buf[0]);
+        ADC_Sampler_Accumulate(&adc_pair_buf[0]);
     }
     ADC_Sampler_TryFinish();
 }
@@ -303,11 +314,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        ADC_Sampler_Accumulate(&s_acc_dut, &adc1_buf[ADC_SAMPLER_PAIRS_PER_HALF]);
-    }
-    else if (hadc->Instance == ADC2)
-    {
-        ADC_Sampler_Accumulate(&s_acc_cur, &adc2_buf[ADC_SAMPLER_PAIRS_PER_HALF]);
+        ADC_Sampler_Accumulate(&adc_pair_buf[ADC_SAMPLER_PAIRS_PER_HALF]);
     }
     ADC_Sampler_TryFinish();
 }

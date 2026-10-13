@@ -68,8 +68,22 @@ void MX_ADC1_Init(void)
   }
 
   /** Configure the ADC multi-mode
+  *  双 ADC 规则组同步模式:ADC1 为主、ADC2 为从。一次触发让两路在同一时刻采样,
+  *  一对结果打包进公共数据寄存器 CDR（bit[15:0]=ADC1=Ui,bit[31:16]=ADC2=Uo）,
+  *  只由 ADC1 的 DMA 搬运,消掉独立模式下两路触发之间的几百纳秒采样时刻偏差。
+  *
+  *  警告:CCR 里的 DUAL/DAMDF/DELAY 位只有在两个 ADC 都处于关闭状态时才写得进去
+  *  （HAL_ADCEx_MultiModeConfigChannel 内部按 __LL_ADC_IS_ENABLED_ALL_COMMON_INSTANCE
+  *  判断,任一 ADC 已使能就整段跳过）。所以这几行必须留在 HAL_ADC_Init() 之后、
+  *  任何 Calibration/MultiModeStart 之前——也就是现在这个位置。挪到后面不会报错,
+  *  只会静默退回独立模式。ADC2 的初始化（MX_ADC2_Init）不碰 CCR,先后顺序无妨。
+  *
+  *  本工程分辨率 16 位,故 DualModeData 取 32~10 位档:一个 32 位字装一对结果。
+  *  TwoSamplingDelay 只对交错/交替触发等模式有意义,同步模式下硬件忽略它。
   */
-  multimode.Mode = ADC_MODE_INDEPENDENT;
+  multimode.Mode = ADC_DUALMODE_REGSIMULT;
+  multimode.DualModeData = ADC_DUALMODEDATAFORMAT_32_10_BITS;
+  multimode.TwoSamplingDelay = ADC_TWOSAMPLINGDELAY_1CYCLE;
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
   {
     Error_Handler();
@@ -108,6 +122,10 @@ void MX_ADC2_Init(void)
   /* USER CODE END ADC2_Init 1 */
 
   /** Common config
+  *  ADC2 是双 ADC 同步模式的从 ADC:触发沿由主 ADC 内部带过来（HAL 只用主 ADC 的
+  *  句柄启动同步转换,不会单独启动 ADC2）,结果写进 CDR 的高半字。下面这些
+  *  ExternalTrigConv / ConversionDataManagement 在同步模式下不参与工作,保留是为了
+  *  与 .ioc 一致、以及切回独立模式时立刻可用。
   */
   hadc2.Instance = ADC2;
   hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV2;
@@ -178,8 +196,10 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     hdma_adc1.Init.Direction = DMA_PERIPH_TO_MEMORY;
     hdma_adc1.Init.PeriphInc = DMA_PINC_DISABLE;
     hdma_adc1.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_adc1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
-    hdma_adc1.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+    /* 双 ADC 同步模式读的是 32 位公共数据寄存器 CDR（低半字 ADC1、高半字 ADC2）,
+     * 所以外设侧和存储侧都必须是"字"对齐。用半字会把高半字（ADC2 的 Uo）丢掉。 */
+    hdma_adc1.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
+    hdma_adc1.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
     hdma_adc1.Init.Mode = DMA_CIRCULAR;
     hdma_adc1.Init.Priority = DMA_PRIORITY_LOW;
     hdma_adc1.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
@@ -222,6 +242,9 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
 
     /* ADC2 DMA Init */
     /* ADC2 Init */
+    /* 同步模式下 ADC2 的转换结果随 ADC1 一起打包在 CDR 里、由 ADC1 的 DMA 搬走,
+     * 所以这条 DMA 运行期不会启动。保留它是为了 .ioc 与 adc.c 保持一致（重新生成时
+     * 不被改乱）,以及将来切回独立模式时可以立即启用。 */
     hdma_adc2.Instance = DMA1_Stream1;
     hdma_adc2.Init.Request = DMA_REQUEST_ADC2;
     hdma_adc2.Init.Direction = DMA_PERIPH_TO_MEMORY;

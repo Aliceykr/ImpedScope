@@ -7,7 +7,7 @@
 主要功能：
 
 - AD9833（SPI1 主机）产生正弦激励，5 个频点由内部扫描计划给出；换频无毛刺，失败报 E19
-- ADC1、ADC2 各自单通道采样（PA0_C、PA1_C），共用 TIM6 触发，DMA 循环写入缓冲区
+- ADC1、ADC2 硬件同步采样（PA0_C、PA1_C，主从同步模式），由 TIM6 触发，结果打包进 CDR、DMA 循环写入缓冲区
 - 每个频率开一个采样窗口，对两路做单频 DFT，得到 `Ui`、`Uo` 的复数分量
 - 传递函数 `H = Uo / Ui`，阻抗 `Z = -R / H`，导纳 `Y = -H / R`
 - 单频幅值过小时丢弃该频点
@@ -27,7 +27,7 @@
 │  ├─ Src/spi.c           SPI1 主机配置（CubeMX 生成，USER CODE 区留空）
 │  ├─ Src/stm32h7xx_it.c  中断入口
 │  ├─ Src/usart.c         UART4 配置（CubeMX 生成）
-│  ├─ Src/adc.c           ADC1、ADC2 配置（CubeMX 生成，单通道、TIM6 触发）
+│  ├─ Src/adc.c           ADC1、ADC2 配置（CubeMX 生成，单通道、TIM6 触发、主从同步模式）
 │  └─ Src/tim.c           TIM6 配置（CubeMX 生成，TRGO 触发 ADC）
 ├─ Drivers/               STM32 HAL 和 CMSIS
 ├─ MDK-ARM/               Keil 工程文件
@@ -121,7 +121,7 @@ SPI 配置：
                         ▼
           ADC_Sampler_SetFrequency(f)  ── 设定频率，开始新的采样窗口
                         │
-                        │  DMA 中断中两路 ADC 累加单频 DFT
+                        │  DMA 中断中从 CDR 拆出两路样本并累加单频 DFT
                         ▼
           ADC_Sampler_GetWindow()     ── 窗口完成时取出 Ui、Uo 的复数分量
                         │  （带墙钟超时；超时报 E18 并清结果）
@@ -154,7 +154,7 @@ fs = 300 kHz（TIM6 触发频率）
 
 ### 6.2 单频 DFT
 
-两路 ADC 在同一个 DMA 块边界开始累加，窗口起点相同，因此样本严格对齐。对每一路：
+两路是硬件同步采样，一对样本来自 CDR 的同一个 32 位字（低半字 ADC1 = `Ui`，高半字 ADC2 = `Uo`），采样时刻完全相同。对每一路：
 
 ```text
 ω = 2π f / fs
@@ -271,7 +271,7 @@ Uo 幅度 = 0.5 V × |H|                  ≈ 0.63 V       （不削顶）
 | 宏 | 所在文件 | 默认值 | 说明 |
 |---|---|---|---|
 | `ADC_SAMPLER_RATE_HZ` | `measure.h` | 300000 | ADC 采样率（TIM6 触发频率） |
-| `ADC_SAMPLER_PAIRS_PER_HALF` | `measure.h` | 64 | 每个 DMA 块的采样点数 |
+| `ADC_SAMPLER_PAIRS_PER_HALF` | `measure.h` | 64 | 每半个 DMA 缓冲区的采样对数（一对 = `Ui`、`Uo` 一次同步采样） |
 | `ADC_SAMPLER_WINDOW_CYCLES` | `measure.h` | 10 | 每个窗口覆盖的信号周期数 |
 | `ADC_SAMPLER_WINDOW_MIN` | `measure.h` | 256 | 窗口最短采样点数（对 5 个目标频率不生效） |
 | `ADC_SAMPLER_WINDOW_MAX` | `measure.h` | 400000 | 窗口最长采样点数 |
@@ -339,8 +339,8 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 ## 9. 已知限制
 
 - **窗口泄漏。** Fs = 300 kHz 下 5 个频率的窗口都是整数个周期（见 6.1 节），理论上泄漏为零；残余误差只来自晶振频率偏差与 AD9833 实际输出与标称值的偏差。
-- **两路增益和采样时刻未标定。** 两路 ADC 的增益误差和两个独立 ADC 之间的采样时刻偏差会直接进入 `H`。见第 12 节。
-- **两个 ADC 不是硬件同步模式。** 它们由同一个 TIM6 TRGO 触发，采样时刻接近，但有几百纳秒的偏差。频率越高，相位误差越大。
+- **两路增益未标定。** 两路 ADC 的增益误差会直接进入 `H`。见第 12 节。
+- **两路采样已硬件同步，但输入路径仍有差异。** ADC1/ADC2 工作在规则组同步模式（见 11.2 节），采样时刻完全相同，不再有几百纳秒的触发偏差；残余相位误差来自 PA0_C/PA1_C 两个模拟开关与源阻抗的带宽差异（第 12 节第 2 点）。
 - **每个频点要等一个完整窗口。** 换频率会重启窗口；窗口长度从 1 ms（10 kHz）到 100 ms（100 Hz）。窗口未完成就切下一个频率，该频点拿不到结果。
 - **幅值门限是占位值。** `CIR_INPUT_MIN_AMP`、`CIR_OUTPUT_MIN_AMP` 为 4 个码值，需要用实际噪声水平确定。
 - **AD9833 频率字量化。** 频率字是 28 位整数，25 MHz MCLK 下分辨率 0.093 Hz。100 Hz 处取整误差最大可达 ±0.047 Hz（约 460 ppm），在一个 10 周期窗口内引入约 0.5~0.9° 的相位误差与极小的泄漏；1 kHz 以上可忽略。详见第 13.4 节。
@@ -364,12 +364,13 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 7 条指令（t0~t6）�
 5. `main.c` 的 USER CODE 区在 `MX_SPI1_Init()` 之后调用 `AD9833_Init()`，失败报 E19。
 6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Freq_PlanGet()`/`Freq_SourceSet()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
-8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发，ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`。
+8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发，ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`。**注意双 ADC 同步模式在 `.ioc` 里没有对应选项**，重新生成会把 `adc.c` 的 `multimode.Mode` 改回 `ADC_MODE_INDEPENDENT`，要按第 10 条手工改回来。
 9. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`。
+10. `adc.c` 中 ADC1 的多模式配置为 `ADC_DUALMODE_REGSIMULT`（连同 `DualModeData`、`TwoSamplingDelay`），且 `HAL_ADCEx_MultiModeConfigChannel()` 必须留在 `HAL_ADC_Init()` 之后、任何校准或启动调用之前；ADC1 的 DMA 必须是字（32 位）对齐——同步模式读的是 32 位 CDR，半字对齐会把 ADC2 的数据丢掉。详见 11.2 节。
 
 ## 11. ADC 采样
 
-ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触发，DMA 循环写入各自的缓冲区。采样结果不再直接显示，而是用于窗口 DFT。代码见 [USE/measure.c](USE/measure.c) 第 2 节。
+ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，各自对一路电压做单通道采样：一次 TIM6 TRGO 让两路在同一时刻开始转换，一对结果打包进公共数据寄存器 CDR 的一个 32 位字（低半字 ADC1 = `Ui`，高半字 ADC2 = `Uo`），由 ADC1 的 DMA 循环写入缓冲区。采样结果不再直接显示，而是用于窗口 DFT。代码见 [USE/measure.c](USE/measure.c) 第 2 节。
 
 ### 11.1 通道与引脚
 
@@ -382,16 +383,17 @@ ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触
 
 ### 11.2 采样时序
 
-- 由 TIM6 TRGO（上升沿）触发两路 ADC。定时器 PSC=3、ARR=99，按 120 MHz 计数时钟计算，采样速率为 300 kHz。
+- 多模式为同步模式（`ADC_DUALMODE_REGSIMULT`，16 位分辨率对应 `ADC_DUALMODEDATAFORMAT_32_10_BITS`）。由 TIM6 TRGO（上升沿）触发：一次触发同时启动两路。定时器 PSC=3、ARR=99，按 120 MHz 计数时钟计算，采样速率为 300 kHz。
 - 关闭连续转换，每次触发完成一次单通道转换。采样时间为 1.5 个 ADC 周期。
 - ADC 时钟由 PLL2 的 75 MHz 经 /2 分频为 37.5 MHz，低于 16 位 ADC 的时钟上限（50 MHz）。
-- ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准，两路都校准，再启动 DMA，最后启动 TIM6。
-- DMA 循环模式，半字（16 位）对齐。每个 DMA 块（半个缓冲区，64 点）回调一次，两路各自计数块序号。
+- ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准（两路都做），再用主 ADC 的句柄调用 `HAL_ADCEx_MultiModeStart_DMA()` 启动同步转换，最后启动 TIM6。顺序不能变：校准会先把 ADC 关掉。
+- 只有 ADC1 的 DMA（`DMA1_Stream2`，`DMA_REQUEST_ADC1`）在搬运，外围与存储都是 32 位字对齐、循环模式；每半个缓冲区（64 对样本）回调一次。ADC2 的 DMA 配置（`DMA1_Stream1`）保留在 `adc.c` 里，但同步模式下不会启动。
+- `HAL_ADCEx_MultiModeConfigChannel()` 写的是两个 ADC 共用的 CCR，而 CCR 里的 DUAL/DAMDF/DELAY 位只有在两个 ADC 都处于关闭状态时才写得进去（HAL 内部按"任一 ADC 已使能就整段跳过"判断）。因此这几行必须留在 `HAL_ADC_Init()` 之后、任何校准或启动调用之前；挪到后面不会报错，只会静默退回独立模式。
 
 ### 11.3 窗口与对齐
 
-- `ADC_Sampler_SetFrequency(f)` 设定频率，并从两路共同的块序号开始新窗口。两路块序号取较大者，保证起点相同。
-- 每路在 DMA 回调中累加窗口内的样本，两路累加到相同点数后，窗口完成。
+- `ADC_Sampler_SetFrequency(f)` 设定频率，并从当前块序号开始新窗口。同步模式下两路只有一个块序号，不存在起点对齐问题。
+- DMA 回调里从每个 32 位字中同时取出两路样本、按同一个权重一并累加，所以两路的累加点数必然相同，到齐即窗口完成。
 - `ADC_Sampler_GetWindow()` 取出完成的窗口，主循环交给 `CircuitID_Compute()`。
 - 同一频率重复调用 `SetFrequency` 不会重启窗口。
 
@@ -399,7 +401,7 @@ ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触
 
 | 函数 / 类型 | 说明 |
 |---|---|
-| `uint8_t ADC_Sampler_Init(void)` | 校准并启动两路 DMA，再启动 TIM6。`main.c` 中调用，失败报 E01 |
+| `uint8_t ADC_Sampler_Init(void)` | 校准两路 ADC 并启动同步转换（只用主 ADC 的 DMA），再启动 TIM6。`main.c` 中调用，失败报 E01 |
 | `uint8_t ADC_Sampler_SetFrequency(uint32_t)` | 设定频率并开始新窗口。频率非法返回 0 |
 | `uint8_t ADC_Sampler_GetWindow(ADC_Window_t *)` | 取出已完成的窗口；没有新窗口时返回 0 |
 | `ADC_Window_t` | `frequency_hz`、`sample_count`，以及 `ui_re`、`ui_im`、`uo_re`、`uo_im`（单频 DFT 的复数分量） |
@@ -411,6 +413,7 @@ ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触
 - 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
 - 采样速率 300 kHz 是按 5 个频点的整数周期条件选定的（见 6.1 节）。需要其他速率时，要同时改 TIM6 的 PSC/ARR、`ADC_SAMPLER_RATE_HZ` **和 `.ioc` 里的 TIM6**，否则用 CubeMX 重新生成代码会把硬件触发率改回去，导致频率轴静默错位。
 - 窗口长度的 10 周期和上下限是初始值，需要结合实测调整。
+- 双 ADC 同步模式没有体现在 `.ioc` 里（`.ioc` 只有 `ADC1.master=1`，没有多模式选项）。每次用 CubeMX 重新生成代码后，都要按第 10 节检查表第 8、10 条把多模式与 DMA 对齐改回来，否则会静默退回独立模式（不报错，但重新出现几百纳秒的采样时刻偏差）。
 
 ## 12. 标定方法
 
@@ -418,7 +421,7 @@ ADC1、ADC2 各自对一路电压做单通道采样，由同一个 TIM6 TRGO 触
 
 1. **两路 ADC 的增益不同。** HAL 的校准只修正偏移和线性度，不修正增益。16 位 ADC 的增益误差常见为 0.1% 到 0.5%，会让 `|H|` 有固定偏差。
 2. **两路的输入路径不同。** PA0_C 和 PA1_C 的模拟开关、寄生电容和源阻抗不同，对高频信号的带宽也不同，会引起相位偏差。
-3. **两路的采样时刻有偏差。** 两个 ADC 由同一个 TIM6 触发，但不是硬件同步模式，时刻差约为几百纳秒。频率越高，这个偏差造成的相位误差越大。例如 10 kHz 时，0.3 µs 的偏差约为 1.1°，约占 φY 误差预算（约 4.5°）的四分之一。这一项通常比增益误差更重要。
+3. **两路输入路径的带宽不同。** ADC1/ADC2 现在是硬件同步采样（见 11.2 节），不再有几百纳秒的触发时刻偏差；残余的相位差来自 PA0_C/PA1_C 的模拟开关、寄生电容和源阻抗差异。用 12.1 节的直通测试标定掉即可。
 4. **反馈电阻 `R` 的实际值。** 代码中的 200 Ω 是标称值，电阻有公差，`|Z|` 和 `|Y|` 的绝对值会直接跟着偏。
 
 ### 12.1 直通测试（标定两路的增益比和相位差）
@@ -443,11 +446,13 @@ H_true(f) = H_meas(f) / H_thru(f)
 
 - 直通测试测得的 `H_thru(f)` 折算成 `measure.c` 标定表（第 3 节）里的两个字段:`mag_ratio = 1/|H_thru|`,`phase_deg = angle(H_thru)`。这样 `H_corrected = H_meas * mag_ratio * e^{-j*phase_deg}` 正好等于 `H_meas / H_thru`。
 - 标定时的采样参数（窗口长度、频率点、采样速率）必须与实际测量时一致，否则标定结果不适用。
-- **代码已实现接口但表内是恒等值**：`measure.c` 第 3 节的标定表 `s_calib[]` 全为 `{1.0f, 0.0f}`，`Calib_Apply()` 已接入 `CircuitID_Compute()`（现为文件内静态函数），即当前不做任何修正。实测出上表的数值后填进该表即可生效。在标定之前，`|Y|`、`G`、`B` 的绝对值不可信，φY 在两路时刻偏差较小时基本可信。
+- **代码已实现接口但表内是恒等值**：`measure.c` 第 3 节的标定表 `s_calib[]` 全为 `{1.0f, 0.0f}`，`Calib_Apply()` 已接入 `CircuitID_Compute()`（现为文件内静态函数），即当前不做任何修正。实测出上表的数值后填进该表即可生效。在标定之前，`|Y|`、`G`、`B` 的绝对值不可信；φY 不再受两路触发时刻偏差影响（已硬件同步），只剩输入路径差异这一小项。
 
-### 12.4 时刻偏差的根本解决
+### 12.4 采样时刻的硬件同步（已实现）
 
-如果第 3 点的时刻偏差对结果影响太大，需要改为 ADC 双重同步模式（ADC1 为主、ADC2 为从），让两路在同一个采样时刻开始转换。这需要修改 `.ioc` 的多模式设置，并调整 `measure.c` 第 2 节的 DMA 处理。
+两路触发时刻偏差已在硬件层面消除：ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，一次 TIM6 触发让两路在同一时刻开始采样，一对结果打包进 CDR 的一个 32 位字，由 ADC1 的 DMA 搬运。实现要点见 11.2 节，重新生成 CubeMX 代码后的必查项见第 10 节检查表第 8、10 条。
+
+没有采用"在软件里事后修正这几百纳秒固定延迟"的方案：δt 确实是固定延迟、直通标定也能把它扣掉，但硬件同步是根因修复，不依赖标定表，也不会随频率和源阻抗变化而失配。
 
 ## 13. AD9833 信号源
 
