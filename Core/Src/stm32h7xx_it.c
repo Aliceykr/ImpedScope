@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "adc.h"          /* hadc1:供下面的 ADC_IRQHandler() 使用 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -243,5 +244,16 @@ void UART4_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/* ADC1/ADC2 全局中断。本工程只用它捕获溢出(OVR):双 ADC 同步模式下 CDR 只有
+ * 一个,HAL_ADCEx_MultiModeStart_DMA() 内部会 __HAL_ADC_ENABLE_IT(ADC_IT_OVR),
+ * 但若 NVIC 里没使能 ADC_IRQn,溢出就永远不会被上报 —— 结果是用陈旧样本算出的
+ * 频响,而且不报任何错。实现在 measure.c 的 HAL_ADC_ErrorCallback()。
+ * 处理函数放在 USER CODE 区,CubeMX 重新生成时不会删除。
+ * NVIC 使能在 measure.c 的 ADC_Sampler_Init() 里做(见那里的说明)。 */
+void ADC_IRQHandler(void)
+{
+  HAL_ADC_IRQHandler(&hadc1);
+}
 
 /* USER CODE END 1 */

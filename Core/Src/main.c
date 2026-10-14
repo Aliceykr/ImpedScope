@@ -127,9 +127,19 @@ int main(void)
   CircuitID_Init();
   Screen_SetStage("MODULE");
 
-  if (ADC_Sampler_Init() == 0u)
   {
-    Screen_Fatal(SCREEN_E01_HAL_INIT);
+    /* 只调用一次:返回 2 = 双 ADC 同步配置未生效(报 E16),0 = 其它初始化失败(E01)。
+     * 前者是"静默失效"防护,配置丢失不会自己报错,只会让 H/Z/Y 悄悄偏掉。 */
+    uint8_t adc_init = ADC_Sampler_Init();
+
+    if (adc_init == 2u)
+    {
+      Screen_Fatal(SCREEN_E16_ADC_DUAL_MODE);
+    }
+    if (adc_init != 1u)
+    {
+      Screen_Fatal(SCREEN_E01_HAL_INIT);
+    }
   }
   Screen_SetStage("SCAN");
   /* USER CODE END 2 */
@@ -150,7 +160,7 @@ int main(void)
       uint32_t deadline;
       uint8_t  got = 0u;
 
-      Freq_SourceSet(f);                    /* AD9833 桩,当前空操作 */
+      Freq_SourceSet(f);                    /* 设定激励频率(AD9833,经 SPI1),失败由内部上报 E13 */
       (void)ADC_Sampler_SetFrequency(f);
 
       /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */

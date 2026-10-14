@@ -35,7 +35,10 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "WINDOW_TIMEOUT", /* E12 */
     "AD9833_SPI",     /* E13 */
     "CIR_UI_INCOH",   /* E14 */
-    "CIR_UO_INCOH"    /* E15 */
+    "CIR_UO_INCOH",   /* E15 */
+    "ADC_DUAL_MODE",  /* E16 */
+    "ADC_OVR",        /* E17 */
+    "ADC_DMA"         /* E18 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */
@@ -177,7 +180,7 @@ static void Screen_SendStatusRaw(const char *value)
     const uint8_t *cursor;
     uint32_t spin;
 
-    /* 状态/错误通道是 t5(见 Screen_BuildCommands);t4 已改作 B 读数。 */
+    /* 状态/错误通道是 t5(见 Screen_BuildCommands)。 */
     length = Screen_AppendCommand(length, "t5", value);
 
     /* 丢弃上一次未能完成的传输:只清发送请求位,不动 gState。 */
@@ -363,7 +366,7 @@ static uint16_t Screen_BuildCommands(void)
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
     length = Screen_AppendCommand(length, "t6", value);
 
-    /* t5:阶段或最近一次错误(t4 已改作 B 读数) */
+    /* t5:阶段或最近一次错误 */
     if (s_fatal_latched != 0u)
     {
         (void)snprintf(value, sizeof(value), "stage:E%02d %s",

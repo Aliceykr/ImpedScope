@@ -68,22 +68,10 @@ void MX_ADC1_Init(void)
   }
 
   /** Configure the ADC multi-mode
-  *  双 ADC 规则组同步模式:ADC1 为主、ADC2 为从。一次触发让两路在同一时刻采样,
-  *  一对结果打包进公共数据寄存器 CDR（bit[15:0]=ADC1=Ui,bit[31:16]=ADC2=Uo）,
-  *  只由 ADC1 的 DMA 搬运,消掉独立模式下两路触发之间的几百纳秒采样时刻偏差。
-  *
-  *  警告:CCR 里的 DUAL/DAMDF/DELAY 位只有在两个 ADC 都处于关闭状态时才写得进去
-  *  （HAL_ADCEx_MultiModeConfigChannel 内部按 __LL_ADC_IS_ENABLED_ALL_COMMON_INSTANCE
-  *  判断,任一 ADC 已使能就整段跳过）。所以这几行必须留在 HAL_ADC_Init() 之后、
-  *  任何 Calibration/MultiModeStart 之前——也就是现在这个位置。挪到后面不会报错,
-  *  只会静默退回独立模式。ADC2 的初始化（MX_ADC2_Init）不碰 CCR,先后顺序无妨。
-  *
-  *  本工程分辨率 16 位,故 DualModeData 取 32~10 位档:一个 32 位字装一对结果。
-  *  TwoSamplingDelay 只对交错/交替触发等模式有意义,同步模式下硬件忽略它。
+  *  CubeMX 生成的默认值:独立模式。本工程实际使用双 ADC 同步模式,真正的配置
+  *  放在下方 USER CODE BEGIN ADC1_Init 2 区并在此区内重新断言一次,原因见该区。
   */
-  multimode.Mode = ADC_DUALMODE_REGSIMULT;
-  multimode.DualModeData = ADC_DUALMODEDATAFORMAT_32_10_BITS;
-  multimode.TwoSamplingDelay = ADC_TWOSAMPLINGDELAY_1CYCLE;
+  multimode.Mode = ADC_MODE_INDEPENDENT;
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
   {
     Error_Handler();
@@ -103,7 +91,33 @@ void MX_ADC1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-
+  /* 双 ADC 规则组同步模式(ADC1 主 / ADC2 从):一次 TIM6 TRGO 让两路在同一时刻
+   * 采样,一对结果打包进公共数据寄存器 CDR(bit[15:0]=ADC1=Ui,bit[31:16]=ADC2=Uo),
+   * 只由 ADC1 的 DMA 搬运,硬件层面消除两路采样的时刻偏差。
+   *
+   * 为什么放在 USER CODE 区而不是上面 CubeMX 生成的 multimode 段:
+   *   .ioc 里没有双 ADC 多模式的对应选项,CubeMX 每次重新生成都会把上面那段写成
+   *   ADC_MODE_INDEPENDENT。放在这里,CubeMX 不会覆盖,重新生成后依然生效。
+   *
+   * 位置约束(不能随意挪动):CCR 的 DUAL/DAMDF/DELAY 位只有在两个 ADC 都处于
+   *   关闭状态(ADEN=0)时才写得进去,HAL 内部按 ADEN 判断,不满足就整段跳过、
+   *   不报错。本区在 HAL_ADC_Init() 之后、任何 Calibration/Start 之前执行,此时
+   *   两个 ADC 都未使能,满足该前置条件。
+   *
+   * 运行期有回读校验:ADC_Sampler_Init()(measure.c)会读回 CCR 核对本配置是否
+   *   真的生效,不生效报 E16 并走致命路径,不会静默退回独立模式。
+   *
+   * 分辨率 16 位,故 DualModeData 取 32~10 位档(一个 32 位字装一对结果)。
+   * TwoSamplingDelay 只对交错/交替触发模式有意义,同步模式下硬件忽略它。
+   * 注意 DMA 必须字对齐:同步模式读的是 32 位 CDR,半字对齐会丢掉 ADC2 的数据。
+   * 该对齐在 HAL_ADC_MspInit() 里设置,并与 .ioc 的 Dma.ADC1.2 保持一致。 */
+  multimode.Mode = ADC_DUALMODE_REGSIMULT;
+  multimode.DualModeData = ADC_DUALMODEDATAFORMAT_32_10_BITS;
+  multimode.TwoSamplingDelay = ADC_TWOSAMPLINGDELAY_1CYCLE;
+  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END ADC1_Init 2 */
 
 }

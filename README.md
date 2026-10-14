@@ -93,7 +93,7 @@ N = round(10 × fs / f)，限制在 [256, 400000] 之间
 fs = 300 kHz（TIM6 触发频率）
 ```
 
-窗口约覆盖 10 个信号周期。低频时 `N` 会被上限截断，窗口不再是整数周期，会有泄漏误差。最短窗口为 1024 点，约 1 ms。
+窗口约覆盖 10 个信号周期。低频时 `N` 变大但不会被上限截断，5 个频点的窗口都是整数个周期，理论上无泄漏。最短窗口为 300 点，约 1 ms。
 
 ### 5.2 单频 DFT
 
@@ -193,12 +193,11 @@ Z 或 Y 的任一结果非有限，报 E09 并丢弃。
 | `y_conductance_siemens` | 电导 G = Re[Y] | S |
 | `y_susceptance_siemens` | 电纳 B = Im[Y] | S |
 | `z_mag_dB` | 阻抗幅值 dB | dB |
-| `y_mag_siemens` / `y_phase_deg` | 导纳幅值和相位 | S / ° |
 | `valid` | 1 表示结果有效 | — |
 
 计算失败时输出结构全部清零，`valid = 0`。
 
-串口屏显示频率、`|Y|`、φY、G、B，另加一行状态/错误与一行心跳（见第 7 节）。
+串口屏显示频率、`|Y|`、φY、G、B（见第 7 节），另加状态/错误行 t5、心跳行 t6 与两路诊断行 t7、t8。
 
 ### 5.7 数值示例
 
@@ -286,6 +285,9 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 9 条指令（t0~t8）�
 | E13 | AD9833_SPI | `ad9833.c` 的调用方（`main.c` / `measure.c`） | SPI1 写 AD9833 寄存器失败（HAL 返回非 OK 或超时） | 非致命 |
 | E14 | CIR_UI_INCOH | `measure.c` | `Ui` 有交流分量但不是单频（`kappa < CIR_MIN_COHERENCE`），信号源未接或未输出 | 非致命 |
 | E15 | CIR_UO_INCOH | `measure.c` | `Uo` 有交流分量但不是单频（`kappa < CIR_MIN_COHERENCE`） | 非致命 |
+| E16 | ADC_DUAL_MODE | `measure.c` 的 `ADC_Sampler_Init()` | 双 ADC 同步模式或数据打包格式未生效(CCR 回读不符) | 致命 |
+| E17 | ADC_OVR | `measure.c` 的 `HAL_ADC_ErrorCallback()` | ADC 溢出,本窗口样本时间轴不可信 | 非致命 |
+| E18 | ADC_DMA | `measure.c` 的 `HAL_ADC_ErrorCallback()` | ADC 的 DMA 传输错误 | 非致命 |
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
@@ -317,9 +319,9 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 9 条指令（t0~t8）�
 5. `main.c` 的 USER CODE 区在 `MX_SPI1_Init()` 之后调用 `AD9833_Init()`，失败报 E13。
 6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Freq_PlanGet()`/`Freq_SourceSet()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
-8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发，ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`。**注意双 ADC 同步模式在 `.ioc` 里没有对应选项**，重新生成会把 `adc.c` 的 `multimode.Mode` 改回 `ADC_MODE_INDEPENDENT`，要按第 10 条手工改回来。
+8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发,ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`;`.ioc` 的 `Dma.ADC1.2` 对齐为 **Word**(`DMA_*DATAALIGN_WORD`),与同步模式的 32 位 CDR 一致。
 9. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`。
-10. `adc.c` 中 ADC1 的多模式配置为 `ADC_DUALMODE_REGSIMULT`（连同 `DualModeData`、`TwoSamplingDelay`），且 `HAL_ADCEx_MultiModeConfigChannel()` 必须留在 `HAL_ADC_Init()` 之后、任何校准或启动调用之前；ADC1 的 DMA 必须是字（32 位）对齐——同步模式读的是 32 位 CDR，半字对齐会把 ADC2 的数据丢掉。详见 10.2 节。
+10. `adc.c` 的双 ADC 同步配置(`ADC_DUALMODE_REGSIMULT`、`DualModeData`、`TwoSamplingDelay`)**已放在 `USER CODE BEGIN ADC1_Init 2` 区**,CubeMX 重新生成不会覆盖,无需再手工改回;`.ioc` 里没有多模式选项属于正常现象。ADC1 的 DMA 字对齐同上。
 
 ## 10. ADC 采样
 
@@ -339,10 +341,10 @@ ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，各自对
 - 多模式为同步模式（`ADC_DUALMODE_REGSIMULT`，16 位分辨率对应 `ADC_DUALMODEDATAFORMAT_32_10_BITS`）。由 TIM6 TRGO（上升沿）触发：一次触发同时启动两路。定时器 PSC=3、ARR=99，按 120 MHz 计数时钟计算，采样速率为 300 kHz。
 - 关闭连续转换，每次触发完成一次单通道转换。采样时间为 1.5 个 ADC 周期。
 - ADC 时钟由 PLL2 的 75 MHz 经 /2 分频为 37.5 MHz，低于 16 位 ADC 的时钟上限（50 MHz）。
-- ADC 在 `ADC_Sampler_Init()` 中先做 `ADC_CALIB_OFFSET_LINEARITY` 校准（两路都做），再用主 ADC 的句柄调用 `HAL_ADCEx_MultiModeStart_DMA()` 启动同步转换，最后启动 TIM6。顺序不能变：校准会先把 ADC 关掉。
-- 只有 ADC1 的 DMA（`DMA1_Stream2`，`DMA_REQUEST_ADC1`）在搬运，外围与存储都是 32 位字对齐、循环模式；每半个缓冲区（64 对样本）回调一次。ADC2 的 DMA 配置（`DMA1_Stream1`）保留在 `adc.c` 里，但同步模式下不会启动。
-- `HAL_ADCEx_MultiModeConfigChannel()` 写的是两个 ADC 共用的 CCR，而 CCR 里的 DUAL/DAMDF/DELAY 位只有在两个 ADC 都处于关闭状态时才写得进去（HAL 内部按"任一 ADC 已使能就整段跳过"判断）。因此这几行必须留在 `HAL_ADC_Init()` 之后、任何校准或启动调用之前；挪到后面不会报错，只会静默退回独立模式。
-
+- ADC 在 `ADC_Sampler_Init()` 中先回读 CCR 核对同步配置(见下条),再做 `ADC_CALIB_OFFSET_LINEARITY` 校准(两路都做),然后用主 ADC 的句柄调用 `HAL_ADCEx_MultiModeStart_DMA()` 启动同步转换,接着使能 `ADC_IRQn`(用于溢出上报),最后启动 TIM6。顺序不能变:校准会先把 ADC 关掉。
+- 只有 ADC1 的 DMA(`DMA1_Stream2`,`DMA_REQUEST_ADC1`)在搬运,外围与存储都是 32 位字对齐、循环模式;每半个缓冲区(64 对样本)回调一次。ADC2 的 DMA 配置(`DMA1_Stream1`)保留在 `adc.c` 里,但同步模式下不会启动。
+- `HAL_ADCEx_MultiModeConfigChannel()` 写的是两个 ADC 共用的 CCR,而 CCR 里的 DUAL/DAMDF/DELAY 位只有在两个 ADC 都处于关闭状态时才写得进去(HAL 内部按“任一 ADC 已使能就整段跳过”判断)。因此这几行**放在 `adc.c` 的 `USER CODE BEGIN ADC1_Init 2` 区**(在 `HAL_ADC_Init()` 之后、任何校准或启动调用之前),CubeMX 重新生成不会覆盖。
+- **配置有运行期回读校验。** `ADC_Sampler_Init()` 会读回 CCR 核对同步模式(`ADC_DUALMODE_REGSIMULT`)与数据打包格式(`32_10_BITS`);不符时返回 2,`main.c` 据此报 **E16 并走致命路径**。这挡住的是“静默退回独立模式”:那种情况下两路不再同时采样,`H` 会悄悄偏掉,而相干性判据挡不住(两路各自看着都像单频)。
 ### 10.3 窗口与对齐
 
 - `ADC_Sampler_SetFrequency(f)` 设定频率，并从当前块序号开始新窗口。同步模式下两路只有一个块序号，不存在起点对齐问题。
@@ -350,6 +352,7 @@ ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，各自对
 - 累加器同时累计两路样本的平方和，窗口完成时算出各自的交流有效值（`ui_rms`、`uo_rms`），供 `CircuitID_Compute()` 做相干性判据（见 5.2 节）。这两个值不参与 H、Z、Y 的计算。
 - `ADC_Sampler_GetWindow()` 取出完成的窗口，主循环交给 `CircuitID_Compute()`。
 - 同一频率重复调用 `SetFrequency` 不会重启窗口。
+- **溢出(OVR)会作废当前窗口。** 双 ADC 同步模式下 CDR 只有一个,溢出意味着某个采样时刻的结果被覆盖,本窗口的时间轴不再可信。`HAL_ADC_ErrorCallback()`(覆盖 HAL 的 weak 定义)在检出 `HAL_ADC_ERROR_OVR` 时记 E17、置弃窗标志,窗口累计满时直接丢弃、不置 `s_ready`,由主循环等下一个干净窗口;DMA 传输错误记 E18 并同样弃窗。两者都不终止测量。此机制依赖 `ADC_IRQn` 在 NVIC 中使能 —— 由 `ADC_Sampler_Init()` 完成(放在该处是为了不被 CubeMX 重新生成覆盖),处理函数是 `stm32h7xx_it.c` 里 USER CODE 区的 `ADC_IRQHandler()`。当前 300 kHz 下 DMA 余量充足,正常不会触发。
 
 ### 10.4 接口
 
@@ -367,7 +370,7 @@ ADC1（主）与 ADC2（从）工作在双 ADC 规则组同步模式，各自对
 - 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
 - 采样速率 300 kHz 是按 5 个频点的整数周期条件选定的（见 5.1 节）。需要其他速率时，要同时改 TIM6 的 PSC/ARR、`ADC_SAMPLER_RATE_HZ` **和 `.ioc` 里的 TIM6**，否则用 CubeMX 重新生成代码会把硬件触发率改回去，导致频率轴静默错位。
 - 窗口长度的 10 周期和上下限是初始值，需要结合实测调整。
-- 双 ADC 同步模式没有体现在 `.ioc` 里（`.ioc` 只有 `ADC1.master=1`，没有多模式选项）。每次用 CubeMX 重新生成代码后，都要按第 9 节检查表第 8、10 条把多模式与 DMA 对齐改回来，否则会静默退回独立模式（不报错，但重新出现几百纳秒的采样时刻偏差）。
+- 双 ADC 同步模式没有体现在 `.ioc` 里(`.ioc` 只有 `ADC1.master=1`,没有多模式选项),但配置已放进 `adc.c` 的 `USER CODE` 区,重新生成不会丢失;`.ioc` 的 DMA 对齐也已同步为 Word。若该配置仍因故失效,`ADC_Sampler_Init()` 的回读校验会报 E16 而不是静默降级(见 10.2 节)。
 
 ## 11. 标定方法
 

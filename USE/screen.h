@@ -35,7 +35,10 @@ typedef enum
     SCREEN_E13_AD9833_SPI     = 13u, /* AD9833 经 SPI1 写寄存器失败，非致命      */
     SCREEN_E14_CIR_UI_INCOH   = 14u, /* Ui 有交流分量但不是单频，信号源未接/未输出 */
     SCREEN_E15_CIR_UO_INCOH   = 15u, /* Uo 有交流分量但不是单频                  */
-    SCREEN_ERROR_CODE_MAX     = 15u
+    SCREEN_E16_ADC_DUAL_MODE  = 16u, /* 双 ADC 同步配置未生效(CCR 回读不符),致命 */
+    SCREEN_E17_ADC_OVR        = 17u, /* ADC 溢出(OVR),非致命                    */
+    SCREEN_E18_ADC_DMA        = 18u, /* ADC 的 DMA 传输错误,非致命               */
+    SCREEN_ERROR_CODE_MAX     = 18u
 } Screen_ErrorCode_t;
 
 /* 复位发送状态并记录起始时间；在 MX_UART4_Init() 之后调用。 */
@@ -49,7 +52,8 @@ void Screen_SetResult(const FRF_Point_t *result);
  * 电压单位 V（去直流后的交流有效值），相干性是无量纲的 0~1，1.0 表示纯单频。 */
 void Screen_SetDebug(float ui_volt, float uo_volt, float ui_coherence, float uo_coherence);
 
-/* 清除已保存的结果,下一次刷新时 t0~t4 显示 "-"。用于失败/超时路径,避免显示陈旧读数。 */
+/* 清除已保存的结果,下一次刷新时 t0~t4 显示 "-"(t7、t8 是窗口诊断量,不受影响)。
+ * 用于失败/超时路径,避免显示陈旧读数。 */
 void Screen_ClearResult(void);
 
 /* 记录当前运行阶段（如 "BOOT"、"LOOP"），不立即发送。 */

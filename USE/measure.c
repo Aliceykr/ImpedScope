@@ -99,6 +99,10 @@ static double    s_step_im;
 static ADC_Window_t s_window;
 static volatile uint8_t s_ready;
 
+/* 本窗口内发生过 ADC 溢出/DMA 错误时置位,窗口完成时据此弃掉该窗口。
+ * 由 HAL_ADC_ErrorCallback()(中断上下文)写,ADC_Sampler_TryFinish() 读并清除。 */
+static volatile uint8_t s_ovr_discard;
+
 static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block);
 static void ADC_Sampler_Accumulate(const uint32_t *block);
 static void ADC_Sampler_Phasor(const ADC_Acc_t *acc, double sum_x, double acc_re, double acc_im,
@@ -212,6 +216,17 @@ static void ADC_Sampler_TryFinish(void)
         return;
     }
 
+    /* 本窗口内出现过 ADC 溢出或 DMA 错误:样本时间轴已不可信,整个窗口作废。
+     * 不置 s_ready,让主循环继续等下一个干净窗口(下一个窗口最长约 100 ms,
+     * 仍在 500 ms 超时预算内,所以正常的偶发溢出不会引起 E12)。
+     * 错误码已由 HAL_ADC_ErrorCallback() 记入 E17/E18。 */
+    if (s_ovr_discard != 0u)
+    {
+        s_ovr_discard = 0u;
+        ADC_Sampler_ResetAcc(&s_acc, s_acc.blocks);
+        return;
+    }
+
     s_window.frequency_hz = s_frequency_hz;
     s_window.sample_count = s_target;
     ADC_Sampler_Phasor(&s_acc, s_acc.ui_sum, s_acc.ui_re, s_acc.ui_im, &s_window.ui_re, &s_window.ui_im);
@@ -228,6 +243,23 @@ static void ADC_Sampler_TryFinish(void)
 
 uint8_t ADC_Sampler_Init(void)
 {
+    /* 先核对双 ADC 同步模式是否真的生效(配置在 adc.c 的 USER CODE 区写入)。
+     * 这是一个"静默失效"防护:若 CCR 被改回独立模式,两路不再是同一时刻采样;
+     * 若 DMA 被改回半字对齐,还会丢掉 Uo —— 两种情况都不会自己报错,只会让
+     * H、Z、Y 悄悄偏掉(相干性判据也挡不住,因为两路各自看着都像单频)。
+     * 故在上电初始化阶段就回读 CCR 核对,不符直接判定为致命(E16)。 */
+    if (LL_ADC_GetMultimode(ADC12_COMMON) != LL_ADC_MULTI_DUAL_REG_SIMULT)
+    {
+        return 2u;      /* 双 ADC 同步模式未生效 -> 调用方报 E16 */
+    }
+
+    /* 数据打包格式也必须是 32~10 位档(一个 32 位字装一对结果),否则 DMA 按字
+     * 搬运时拿到的不是"低半字 Ui + 高半字 Uo"的布局。 */
+    if (LL_ADC_GetMultiDMATransfer(ADC12_COMMON) != LL_ADC_MULTI_REG_DMA_RES_32_10B)
+    {
+        return 2u;      /* 数据打包格式不符 -> 调用方报 E16 */
+    }
+
     /* H7 上电后必须校准，否则偏移和增益误差会直接进入读数。 */
     if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED) != HAL_OK)
     {
@@ -248,7 +280,16 @@ uint8_t ADC_Sampler_Init(void)
         return 0u;
     }
 
-    /* 两路 ADC 都由 TIM6 TRGO 触发，定时器不启动就不会有采样。 */
+    /* 使能 ADC 全局中断,让溢出(OVR)能被上报。HAL_ADCEx_MultiModeStart_DMA() 会
+     * 打开 ADC_IT_OVR,但前提是 NVIC 里 ADC_IRQn 已使能,否则溢出被静默吞掉,
+     * 结果就是用陈旧样本算出的频响而不报任何错。
+     * 放在这里(而不是 .ioc 的 NVIC 配置)是为了让它在 CubeMX 重新生成后依然有效 ——
+     * 本工程已有先例:EXTI4 与 PA4 也是同样理由在 USER CODE 区手动配置的。
+     * 优先级取 5(数值越大越低),低于 DMA1_Stream2 的 0,让搬运优先。
+     * 处理函数见 Core/Src/stm32h7xx_it.c 的 ADC_IRQHandler()。 */
+    HAL_NVIC_SetPriority(ADC_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(ADC_IRQn);
+
     if (HAL_TIM_Base_Start(&htim6) != HAL_OK)
     {
         return 0u;
@@ -302,6 +343,7 @@ uint8_t ADC_Sampler_SetFrequency(uint32_t frequency_hz)
     s_step_re = step_re;
     s_step_im = step_im;
     s_ready = 0u;
+    s_ovr_discard = 0u;      /* 新窗口重新开始,不继承上一个窗口的错误标记 */
     ADC_Sampler_ResetAcc(&s_acc, start);
 
     __set_PRIMASK(primask);
@@ -350,6 +392,33 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         ADC_Sampler_Accumulate(&adc_pair_buf[ADC_SAMPLER_PAIRS_PER_HALF]);
     }
     ADC_Sampler_TryFinish();
+}
+
+/* ADC 错误回调(覆盖 HAL 的 weak 定义)。两条来路:
+ *   1) 溢出(OVR):本轮转换完成时上一次的结果还没被 DMA 取走。配置是
+ *      ADC_OVR_DATA_PRESERVED,所以 HAL 把 OVR 当作错误上报,会走到这里。
+ *      两个 ADC 同步模式下 CDR 只有一个,溢出意味着某个采样时刻的结果被覆盖,
+ *      本窗口的时间轴不再可信 —— 弃掉该窗口,不拿它去算 H/Z/Y。
+ *   2) DMA 传输错误:结果根本没搬进来,同样弃窗口。
+ * 两者都只计数上报,不终止测量:下一个窗口会重新开始。 */
+void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance != ADC1)
+    {
+        return;
+    }
+
+    if ((hadc->ErrorCode & HAL_ADC_ERROR_OVR) != 0u)
+    {
+        s_ovr_discard = 1u;
+        Screen_ReportError(SCREEN_E17_ADC_OVR);
+    }
+
+    if ((hadc->ErrorCode & HAL_ADC_ERROR_DMA) != 0u)
+    {
+        s_ovr_discard = 1u;
+        Screen_ReportError(SCREEN_E18_ADC_DMA);
+    }
 }
 
 /* ==========================================================================
