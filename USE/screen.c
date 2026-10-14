@@ -33,7 +33,7 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "UART_TX",        /* E10 */
     "UART_BUSY",      /* E11 */
     "WINDOW_TIMEOUT", /* E12 */
-    "AD9833_SPI",     /* E13 */
+    "DDS_SPI",        /* E13 已停用,保留编号 */
     "CIR_UI_INCOH",   /* E14 */
     "CIR_UO_INCOH",   /* E15 */
     "ADC_DUAL_MODE",  /* E16 */

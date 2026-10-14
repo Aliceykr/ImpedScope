@@ -4,7 +4,6 @@
 #include <math.h>
 #include <string.h>
 
-#include "ad9833.h"
 #include "adc.h"
 #include "screen.h"
 #include "tim.h"
@@ -16,33 +15,36 @@
 #define MEASURE_SQRT2      1.4142135623730951
 
 /* ==========================================================================
- * 1. 频率扫描计划
+ * 1. 测量频率
  * ========================================================================== */
 
 /*
- * 5 个测量频率,与赛题要求一致。顺序扫描 100 -> 300 -> 1000 -> 3000 -> 10000 Hz。
+ * 单频点测量:1 kHz。
  *
- * 这 5 个值之比为 1:3:10:30:100,在 Fs = 300 kHz 下 Fs/f 全为整数,
- * 窗口取 10 个周期即为整数个周期(校验表见 measure.h 的 ADC_SAMPLER_WINDOW_CYCLES)。
+ * 激励源在外部 —— 信号源直接接到 Ui 节点,固件不再驱动任何 DDS。
+ * 频率轴约定:本表值同时是激励频率和 DFT 旋转因子的来源,两者必须一致,
+ * 否则频率轴错位、窗口不再是整数周期(泄漏不为零),且不会有任何报错。
+ *
+ * 1 kHz 与采样率的关系:Fs = 300 kHz,Fs/f = 300 为整数,
+ * 窗口取 100 个周期即 30000 点 / 100 ms,是整数个周期,泄漏为零(见 measure.h)。
  */
 static const uint32_t s_freq_plan[FREQ_PLAN_COUNT] = {
-    100u, 300u, 1000u, 3000u, 10000u
+    1000u
 };
 
+/*
+ * 激励源接口。当前为空实现:激励由外部信号源提供,固件不驱动任何器件,
+ * 因此不需要做任何事,也不会上报 E13。
+ *
+ * 保留这个函数的意义是维持调用契约 —— main.c 仍按"设定频率"的语义调用它,
+ * 将来若重新接入片内 DDS 或可编程信号源,只需在此处实现,调用点不用动。
+ *
+ * 注意:它不做的正是"改变实际激励频率"这件事,所以外部信号源的输出频率
+ * 必须与 Freq_PlanGet() 的表值一致,固件无法校验这一点(见 README 已知限制)。
+ */
 void Freq_SourceSet(uint32_t frequency_hz)
 {
-    /* 必须输出与 Freq_PlanGet() 表值完全一致的频率:DFT 的旋转因子用的是表值,
-     * 两者不一致会让频率轴错位、窗口不再是整数周期,而且不会有任何报错。
-     * AD9833_SetFrequency() 内部按 f × 2^28 / MCLK 取整,25 MHz 下分辨率 0.093 Hz。 */
-    if (frequency_hz == 0u)
-    {
-        return;
-    }
-
-    if (AD9833_SetFrequency(frequency_hz) == 0u)
-    {
-        Screen_ReportError(SCREEN_E13_AD9833_SPI);
-    }
+    (void)frequency_hz;   /* 外部信号源,固件不参与设定 */
 }
 
 uint32_t Freq_PlanGet(uint8_t index)
@@ -446,21 +448,21 @@ typedef struct
 #define CALIB_COUNT     (sizeof(s_calib) / sizeof(s_calib[0u]))
 
 /*
- * 标定表:5 个测量频率点。
+ * 标定表:单个测量频率点(1 kHz)。
  *
- * 当前全部为恒等值,即不做任何修正。实测方法:
- * 用已知精密电阻(如 1 kohm / 0.1%)做直通标定,对 5 个频率记录实测 H_cal(f),
- * 与理论值比较得到每个频点的
+ * 当前为恒等值,即不做任何修正。实测方法:
+ * 用已知精密电阻(如 1 kohm / 0.1%)做直通标定,记录实测 H_cal,
+ * 与理论值比较得到
  *   mag_ratio = |H_true| / |H_meas|
  *   phase_deg = angle(H_meas) - angle(H_true)
  * 标定时的采样参数(窗口周期数、Fs)必须与实测一致。
+ *
+ * 注意 Calib_Lookup() 是就近取值、不做插值:本表只有 1 kHz 一项,
+ * 与 Freq_PlanGet() 的表值一一重合,所以没有影响;
+ * 若将来恢复多频点,必须同步扩展这张表。
  */
 static const Calib_Point_t s_calib[] = {
-    {   100.0f, 1.0f, 0.0f },
-    {   300.0f, 1.0f, 0.0f },
     {  1000.0f, 1.0f, 0.0f },
-    {  3000.0f, 1.0f, 0.0f },
-    { 10000.0f, 1.0f, 0.0f },
 };
 
 static uint8_t Calib_Lookup(float frequency_hz, float *mag_ratio, float *phase_deg);

@@ -27,7 +27,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "ad9833.h"
 #include "measure.h"
 #include "screen.h"
 /* USER CODE END Includes */
@@ -116,13 +115,8 @@ int main(void)
   Screen_Init();
   Screen_SetStage("PERIPH");
 
-  /* 激励源:AD9833 挂在 SPI1(主机)上,FSYNC 由 ad9833.c 手动控制。必须在
-   * MX_SPI1_Init() 之后调用。初始化失败不致命,但之后测不到有效频响,
-   * 所以计入 E13 供串口屏显示。 */
-  if (AD9833_Init() == 0u)
-  {
-    Screen_ReportError(SCREEN_E13_AD9833_SPI);
-  }
+  /* 激励源在外部:信号源直接接到 Ui 节点(PA0_C),固件不驱动任何 DDS。
+   * 因此这里没有信号源初始化步骤;SPI1 仍然初始化但不再有从设备。 */
 
   CircuitID_Init();
   Screen_SetStage("MODULE");
@@ -151,7 +145,8 @@ int main(void)
   {
     uint8_t k;
 
-    /* 顺序扫描 5 个频率,循环往复。 */
+    /* 逐个取计划里的频率。当前 FREQ_PLAN_COUNT = 1(单频点 1 kHz),
+     * 所以这个循环只跑一轮;保留循环结构是为了将来恢复多频点时不用改这里。 */
     for (k = 0u; k < FREQ_PLAN_COUNT; ++k)
     {
       uint32_t f = Freq_PlanGet(k);
@@ -160,7 +155,7 @@ int main(void)
       uint32_t deadline;
       uint8_t  got = 0u;
 
-      Freq_SourceSet(f);                    /* 设定激励频率(AD9833,经 SPI1),失败由内部上报 E13 */
+      Freq_SourceSet(f);                    /* 空实现:激励由外部信号源提供,固件不设定 */
       (void)ADC_Sampler_SetFrequency(f);
 
       /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */

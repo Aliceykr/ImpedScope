@@ -38,11 +38,10 @@ void MX_SPI1_Init(void)
 
   /* USER CODE END SPI1_Init 1 */
   hspi1.Instance = SPI1;
-  /* 主机模式:AD9833 是从机,一次 16 位帧就是一条完整的写命令(D15..D0)。
-   * Mode 2(CPOL=1 / CPHA=0):AD9833 在 SCLK 下降沿锁存数据,空闲电平为高。
-   * 软件 NSS:FSYNC 由 ad9833.c 用 PA4 手动控制 —— 硬件 NSS 在整个 SPE=1 期间
-   * 一直保持低电平,无法在两条命令之间抬起来给 AD9833 分帧。
-   * 波特率 = 75 MHz(PLL2Q) / 8 = 9.375 MHz,AD9833 的 SCLK 上限是 40 MHz。 */
+  /* SPI1 当前无从设备:原先挂在这里的 DDS(AD9833)已不在板上,激励改由外部
+   * 信号源提供。SPI1 的初始化保留下来,以便将来接入需要 SPI 的器件。
+   * 现有参数按 16 位帧、Mode 2(CPOL=1 / CPHA=0)、软件 NSS 配置,
+   * 波特率 = 75 MHz(PLL2Q) / 8 = 9.375 MHz。接新器件前需按该器件手册复核。 */
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
   hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
@@ -89,9 +88,9 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOG_CLK_ENABLE();
     /**SPI1 GPIO Configuration
-    PB5     ------> SPI1_MOSI  -> AD9833 SDATA
-    PG11    ------> SPI1_SCK   -> AD9833 SCLK
-    PG9     ------> SPI1_MISO  (AD9833 只写不读,保留配置但未使用)
+    PB5     ------> SPI1_MOSI
+    PG11    ------> SPI1_SCK
+    PG9     ------> SPI1_MISO
     */
     GPIO_InitStruct.Pin = GPIO_PIN_5;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -107,9 +106,8 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
     GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
     HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
   /* USER CODE BEGIN SPI1_MspInit 1 */
-  /* FSYNC(PA4)不在这里配置:它不再是 SPI1_NSS,而是由 USE/ad9833.c 配成普通推挽
-   * 输出,并在每条写命令前后手动拉低/拉高。SPI1 也不再需要 DMA 和中断。 */
-  /* USER CODE END SPI1_MspInit 1 */
+  /* PA4 不再由本工程使用(原先做 DDS 的片选),CubeMX 里未分配。
+   * SPI1 不使用 DMA 和中断。 */
   }
 }
 

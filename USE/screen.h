@@ -32,7 +32,7 @@ typedef enum
     SCREEN_E10_UART_TX        = 10u, /* Transmit_IT 返回非 OK，非致命            */
     SCREEN_E11_UART_BUSY      = 11u, /* 上一条未发完本周期跳过，非致命           */
     SCREEN_E12_WINDOW_TIMEOUT = 12u, /* 等待 ADC 窗口完成超时，非致命            */
-    SCREEN_E13_AD9833_SPI     = 13u, /* AD9833 经 SPI1 写寄存器失败，非致命      */
+    SCREEN_E13_AD9833_SPI     = 13u, /* 已停用:固件不再驱动 DDS,保留编号占位      */
     SCREEN_E14_CIR_UI_INCOH   = 14u, /* Ui 有交流分量但不是单频，信号源未接/未输出 */
     SCREEN_E15_CIR_UO_INCOH   = 15u, /* Uo 有交流分量但不是单频                  */
     SCREEN_E16_ADC_DUAL_MODE  = 16u, /* 双 ADC 同步配置未生效(CCR 回读不符),致命 */
