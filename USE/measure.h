@@ -112,6 +112,43 @@ uint32_t Freq_PlanGet(uint8_t index);
 /* ADC 码值 → 伏特。只用于 t7、t8 显示，不参与 H、Z、Y 的计算。 */
 #define ADC_SAMPLER_LSB_TO_V         ((double)ADC_SAMPLER_VREF_V / 65535.0)
 
+/* 削波(贴 ADC 量程边)检测的配置与计数。
+ *
+ * 为什么需要它:ADC 是单端 0~65535,超出量程的样本被钳在边界上。钳平后的波形
+ * 仍带很强的基波分量,所以幅值门限和相干性判据都拦不住 —— 屏幕上会显示看着
+ * 完全正常的 |Y|、phiY、G、B,而数据其实是错的。这是本工程唯一一类"静默给出
+ * 错误结果"的失效,必须在代码里显式检测。
+ *
+ * 用贴边阈值而不是精确等于 0/65535:真实削顶时受噪声与运放输出阻抗影响,
+ * 边界样本会在 0 附近抖动若干码值,不会精确停在 0。
+ *
+ * 局限:本检测抓的是"ADC 端已经贴边"。若前端电路在 ADC 之前就自己饱和
+ * (例如运放先削顶),ADC 看到的是尚未贴边的"平顶"波形,这里抓不到;
+ * 那种情况只能靠相干性判据(削顶产生谐波使 kappa 下降)间接反映。 */
+#define CIR_CLIP_LOW_CODES          64u     /* <= 此码值算贴低边(0 V 侧)      */
+#define CIR_CLIP_HIGH_CODES         65471u  /* >= 此码值算贴高边(3.3 V 侧)    */
+
+/* 贴边样本占窗口的比例上限,超过即判定削波,单位千分之一。
+ *
+ * 取 1%(10 permille)的依据 —— 用解析式算出的贴边比例:
+ *   干净正弦,幅度到 1.60 V(距 1.65 V 轨道还有 0.05 V)  ->  0%
+ *   恰好触轨,幅度 1.65 V                                  ->  4.0%
+ *   轻微削顶 0.05 V                                        -> 16.0%
+ *   直流偏置错(中点 0 V,负半周全削)                       -> 50.2%
+ * 干净与削顶之间是一个很宽的间隙(0% vs >=4%),所以门限取在中间,
+ * 既不会因噪声误报,也不会漏掉轻微削顶。窗口 30000 点时 1% = 300 个样本。
+ *
+ * 注意:判定时用整数运算(sum * 1000 > N * 10),不引入浮点除法。 */
+#define CIR_CLIP_MAX_PERMILLE       10u
+
+/* 一个窗口内两路贴量程边界的样本计数。 */
+typedef struct
+{
+    uint32_t ui_low;    /* Ui 贴低边(0 V 侧)的样本数 */
+    uint32_t ui_high;   /* Ui 贴高边(3.3 V 侧)的样本数 */
+    uint32_t uo_low;    /* Uo 贴低边的样本数 */
+    uint32_t uo_high;   /* Uo 贴高边的样本数 */
+} ADC_ClipCount_t;
 /* 一个窗口的单频 DFT 结果。
  * 幅值换算:|U| = 2 * sqrt(re^2 + im^2) / sample_count,单位为 ADC 码值;
  * 换成电压用 ADC_SAMPLER_LSB_TO_V(= VREF+ / 65535)。
@@ -130,6 +167,7 @@ typedef struct
     double   uo_im;
     double   ui_rms;        /* 窗口内 Ui 去掉直流后的交流有效值，单位 ADC 码值 */
     double   uo_rms;        /* 窗口内 Uo 去掉直流后的交流有效值，单位 ADC 码值 */
+    ADC_ClipCount_t clip;   /* 窗口内两路贴 ADC 量程边界的样本计数,用于削波判定 */
 } ADC_Window_t;
 
 /* 校准两路 ADC,再启动双 ADC 同步转换(只用主 ADC 的 DMA),最后启动 TIM6。
@@ -186,7 +224,7 @@ uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out);
  * 取 0.2 留了 20 倍以上的噪声余量,同时容忍波形带少量谐波失真(方波约 0.9、三角波约 1.0)。 */
 #define CIR_MIN_COHERENCE           0.2f
 
-/* |H| 下限：低于此值阻抗趋于无穷，结果不可靠。 */
+/* |H| 下限:低于此值阻抗趋于无穷,结果不可靠。 */
 #define CIR_H_MIN_MAG               1e-6f
 
 typedef struct

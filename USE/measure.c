@@ -91,6 +91,10 @@ typedef struct
     double   uo_sum;        /* sum Uo，用于去除直流 */
     double   ui_sq;         /* sum Ui^2，用于算交流有效值 */
     double   uo_sq;         /* sum Uo^2，用于算交流有效值 */
+    uint32_t ui_clip_low;    /* sum(Ui <= CIR_CLIP_LOW_CODES),削波检测 */
+    uint32_t ui_clip_high;   /* sum(Ui >= CIR_CLIP_HIGH_CODES)          */
+    uint32_t uo_clip_low;    /* sum(Uo <= CIR_CLIP_LOW_CODES)           */
+    uint32_t uo_clip_high;   /* sum(Uo >= CIR_CLIP_HIGH_CODES)          */
 } ADC_Acc_t;
 
 static ADC_Acc_t s_acc;
@@ -151,6 +155,10 @@ static void ADC_Sampler_ResetAcc(ADC_Acc_t *acc, uint32_t start_block)
     acc->uo_sum = 0.0;
     acc->ui_sq = 0.0;
     acc->uo_sq = 0.0;
+    acc->ui_clip_low = 0u;
+    acc->ui_clip_high = 0u;
+    acc->uo_clip_low = 0u;
+    acc->uo_clip_high = 0u;
 }
 
 /* 处理一个 DMA 块（ADC_SAMPLER_PAIRS_PER_HALF 对采样点）。只在 DMA 中断中调用。
@@ -170,8 +178,10 @@ static void ADC_Sampler_Accumulate(const uint32_t *block)
 
     for (index = 0u; (index < ADC_SAMPLER_PAIRS_PER_HALF) && (s_acc.count < s_target); ++index)
     {
-        double ui = (double)ADC_PAIR_UI(block[index]);
-        double uo = (double)ADC_PAIR_UO(block[index]);
+        uint16_t ui_code = ADC_PAIR_UI(block[index]);
+        uint16_t uo_code = ADC_PAIR_UO(block[index]);
+        double ui = (double)ui_code;
+        double uo = (double)uo_code;
         double next_re;
         double next_im;
 
@@ -185,6 +195,32 @@ static void ADC_Sampler_Accumulate(const uint32_t *block)
         s_acc.uo_sum += uo;
         s_acc.ui_sq += ui * ui;
         s_acc.uo_sq += uo * uo;
+
+        /* 削波检测:用原始码值判断是否贴量程边。必须在去直流之前判断 ——
+         * 削顶样本本身就是"被钳住的极值",去直流不会改变它贴边的事实,
+         * 但用原始码值最直观也最省事。两路各自独立统计。 */
+        if (ui_code <= (uint16_t)CIR_CLIP_LOW_CODES)
+        {
+            s_acc.ui_clip_low++;
+        }
+        else if (ui_code >= (uint16_t)CIR_CLIP_HIGH_CODES)
+        {
+            s_acc.ui_clip_high++;
+        }
+        else
+        {
+            /* 既未贴低边也未贴高边,无需统计 */
+        }
+
+        if (uo_code <= (uint16_t)CIR_CLIP_LOW_CODES)
+        {
+            s_acc.uo_clip_low++;
+        }
+        else if (uo_code >= (uint16_t)CIR_CLIP_HIGH_CODES)
+        {
+            s_acc.uo_clip_high++;
+        }
+
         s_acc.count++;
 
         /* 权重推进一个采样点：rot *= step。 */
@@ -237,6 +273,13 @@ static void ADC_Sampler_TryFinish(void)
     /* 交流有效值：与单频幅值一起构成相干性判据（见 measure.h 的 CIR_MIN_COHERENCE）。 */
     s_window.ui_rms = ADC_Sampler_AcRms(s_acc.ui_sq, s_acc.ui_sum, s_acc.count);
     s_window.uo_rms = ADC_Sampler_AcRms(s_acc.uo_sq, s_acc.uo_sum, s_acc.count);
+
+    /* 削波统计:供 CircuitID_Compute() 判定是否削顶。计数在 DMA 中断里累加,
+     * 这里只是搬运,不在此处判定 —— 判定逻辑集中放在有效性检查里。 */
+    s_window.clip.ui_low = s_acc.ui_clip_low;
+    s_window.clip.ui_high = s_acc.ui_clip_high;
+    s_window.clip.uo_low = s_acc.uo_clip_low;
+    s_window.clip.uo_high = s_acc.uo_clip_high;
     s_ready = 1u;
 
     /* 下一窗口从本窗口结束后的下一个块开始：两路共用一个块序号，起点天然一致。 */
@@ -637,6 +680,34 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
      * 会显示一堆看着正常的 |Y|、φY —— 这里用 kappa 把它挡下来。 */
     ui_coh = CircuitID_Coherence(ui_mag, input->ui_rms);
     uo_coh = CircuitID_Coherence(uo_mag, input->uo_rms);
+
+    /* 削波检测:统计落在 ADC 量程两端贴边区(<= 64 或 >= 65471)的样本比例。
+     *
+     * 为什么必须单独检测:削平后的波形仍带很强的基波分量,幅值门限和相干性
+     * 判据都拦不住 —— 计算表明即使削掉 95% 的峰值,kappa 仍有 0.91,远高于
+     * 门限 0.2。若不检测,屏幕会显示看着完全正常的 |Y|、phiY、G、B。
+     *
+     * 用整数运算比较(sum * 1000 vs N * permille),不引入浮点除法。
+     * 判据门限取 1%:干净信号(哪怕幅度到轨)为 0%,真实削顶在 4% 以上。
+     *
+     * 注意:检出削波后【仍然继续计算并显示结果】,只是报一个错误码提示
+     * 这次读数可能不可信。与 E17/E18(时间轴不可信)不同,削顶时波形是完整的,
+     * 结果仍有参考价值,该由使用者判断,不该由固件替他丢弃。 */
+    {
+        uint32_t n_points = input->sample_count;
+        uint32_t ui_clip = input->clip.ui_low + input->clip.ui_high;
+        uint32_t uo_clip = input->clip.uo_low + input->clip.uo_high;
+
+        if ((ui_clip * 1000u) > (n_points * (uint32_t)CIR_CLIP_MAX_PERMILLE))
+        {
+            Screen_ReportError(SCREEN_E19_ADC_CLIP_UI);
+        }
+
+        if ((uo_clip * 1000u) > (n_points * (uint32_t)CIR_CLIP_MAX_PERMILLE))
+        {
+            Screen_ReportError(SCREEN_E20_ADC_CLIP_UO);
+        }
+    }
 
     /* 先送到串口屏（t7、t8），这样失败时也能看到两路电压与相干性。
      * 送的是去直流后的交流有效值（RMS，单位 V），可直接与万用表、示波器的读数对照；

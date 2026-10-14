@@ -38,7 +38,9 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "CIR_UO_INCOH",   /* E15 */
     "ADC_DUAL_MODE",  /* E16 */
     "ADC_OVR",        /* E17 */
-    "ADC_DMA"         /* E18 */
+    "ADC_DMA",        /* E18 */
+    "ADC_CLIP_UI",    /* E19 */
+    "ADC_CLIP_UO"     /* E20 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */
