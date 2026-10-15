@@ -364,6 +364,21 @@ static uint16_t Screen_BuildCommands(void)
         length = Screen_AppendCommand(length, "t8", "Uo:-");
     }
 
+    /* t9:H 的幅值(dB)与相位(°)。H 本身不参与显示,但标定必须读它:
+     * 直通测试时两路接同一节点,H 的理论值是 0 dB / 0°,实测偏差就是第 3 节
+     * 标定表要填的两个数。|Y|、φY 是在 H 之后才对 H 做变换,读数时反推麻烦,
+     * 所以单独显示一行。*/
+    if (s_has_result != 0u)
+    {
+        (void)snprintf(value, sizeof(value), "H:%.2fdB A:%.2f",
+                       (double)s_result.h_magnitude_dB, (double)s_result.h_phase_deg);
+    }
+    else
+    {
+        (void)snprintf(value, sizeof(value), "H:-");
+    }
+    length = Screen_AppendCommand(length, "t9", value);
+
     /* t6:心跳,每刷新周期 +1 */
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);
     length = Screen_AppendCommand(length, "t6", value);

@@ -70,7 +70,7 @@ void Screen_Fatal(uint8_t code);
 /* 由 Error_Handler() 在关中断后调用：尝试阻塞发送致命码，然后返回。 */
 void Screen_FatalReportBlocking(void);
 
-/* 在主循环中反复调用;每 500 ms 非阻塞刷新全部 9 个文本框(t0~t8)。 */
+/* 在主循环中反复调用;每 500 ms 非阻塞刷新全部 10 个文本框(t0~t9)。 */
 void Screen_Poll(void);
 
 #ifdef __cplusplus
