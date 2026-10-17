@@ -19,10 +19,11 @@
  * ========================================================================== */
 
 /*
- * 单频点测量:1 kHz。
+ * 默认频点:1 kHz。运行时频率由 Measure_SetFrequency() 维护,本表只作默认值/
+ * 标定基准;应用层收到屏幕命令后可以覆盖它。
  *
  * 激励源在外部 —— 信号源直接接到 Ui 节点,固件不再驱动任何 DDS。
- * 频率轴约定:本表值同时是激励频率和 DFT 旋转因子的来源,两者必须一致,
+ * 频率轴约定:外部信号源的输出频率必须与 Measure_GetFrequency() 一致,
  * 否则频率轴错位、窗口不再是整数周期(泄漏不为零),且不会有任何报错。
  *
  * 1 kHz 与采样率的关系:Fs = 300 kHz,Fs/f = 300 为整数,
@@ -40,7 +41,7 @@ static const uint32_t s_freq_plan[FREQ_PLAN_COUNT] = {
  * 将来若重新接入片内 DDS 或可编程信号源,只需在此处实现,调用点不用动。
  *
  * 注意:它不做的正是"改变实际激励频率"这件事,所以外部信号源的输出频率
- * 必须与 Freq_PlanGet() 的表值一致,固件无法校验这一点(见 README 已知限制)。
+ * 必须与 Measure_GetFrequency() 一致,固件无法校验这一点(见 README 已知限制)。
  */
 void Freq_SourceSet(uint32_t frequency_hz)
 {
@@ -55,6 +56,28 @@ uint32_t Freq_PlanGet(uint8_t index)
     }
 
     return s_freq_plan[index];
+}
+
+/* 运行时频率。屏幕命令写、主循环读;32 位访问在 Cortex-M7 上是原子的。 */
+#define MEASURE_FREQ_MIN_HZ   100u
+#define MEASURE_FREQ_MAX_HZ   100000u
+
+static volatile uint32_t s_requested_frequency_hz = 1000u;
+
+uint32_t Measure_GetFrequency(void)
+{
+    return s_requested_frequency_hz;
+}
+
+uint8_t Measure_SetFrequency(uint32_t frequency_hz)
+{
+    if ((frequency_hz < MEASURE_FREQ_MIN_HZ) || (frequency_hz > MEASURE_FREQ_MAX_HZ))
+    {
+        return 0u;
+    }
+
+    s_requested_frequency_hz = frequency_hz;
+    return 1u;
 }
 
 /* ==========================================================================
@@ -501,8 +524,8 @@ typedef struct
  * 标定时的采样参数(窗口周期数、Fs)必须与实测一致。
  *
  * 注意 Calib_Lookup() 是就近取值、不做插值:本表只有 1 kHz 一项,
- * 与 Freq_PlanGet() 的表值一一重合,所以没有影响;
- * 若将来恢复多频点,必须同步扩展这张表。
+ * 默认频点与表值重合;运行时改到其他频点时,仍就近取这一项的恒等修正。
+ * 若将来要做多频点精确标定,必须同步扩展这张表。
  */
 static const Calib_Point_t s_calib[] = {
     {  1000.0f, 1.0f, 0.0f },
@@ -663,6 +686,22 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     ui_mag = 2.0 * sqrt((input->ui_re * input->ui_re) + (input->ui_im * input->ui_im)) / n;
     uo_mag = 2.0 * sqrt((input->uo_re * input->uo_re) + (input->uo_im * input->uo_im)) / n;
 
+    /* 相干性判据：幅值门限只能说明"有不小的交流分量"，说不出这分量是不是单频。
+     * 输入悬空、信号源没接时，噪声落在测量频点上的分量照样能过幅值门限，于是屏幕
+     * 会显示一堆看着正常的 |Y|、φY —— 这里用 kappa 把它挡下来。 */
+    ui_coh = CircuitID_Coherence(ui_mag, input->ui_rms);
+    uo_coh = CircuitID_Coherence(uo_mag, input->uo_rms);
+
+    /* 先送到串口屏（t7、t8），再走幅值/相干性门限。
+     * 放在门限之前是有意的：幅值过小（E04/E05）恰恰是"信号源没接"最需要看两路
+     * 本底的情形；若放在后面，t7、t8 会停留在上一窗口的陈旧读数。
+     * 送的是去直流后的交流有效值（RMS，单位 V），可直接与万用表、示波器的读数对照；
+     * 单频分量的峰值约等于它的 sqrt(2) 倍（相干性接近 1 时该关系成立）。
+     * 门限 CIR_INPUT_MIN_AMP / CIR_OUTPUT_MIN_AMP 用的仍是峰值码值，不在这里换算。 */
+    (void)Screen_SetDebug((float)(input->ui_rms * ADC_SAMPLER_LSB_TO_V),
+                          (float)(input->uo_rms * ADC_SAMPLER_LSB_TO_V),
+                          (float)ui_coh, (float)uo_coh);
+
     if (ui_mag < (double)CIR_INPUT_MIN_AMP)
     {
         Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
@@ -674,12 +713,6 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
         Screen_ReportError(SCREEN_E05_CIR_UO_LOW);
         return 0u;
     }
-
-    /* 相干性判据：幅值门限只能说明"有不小的交流分量"，说不出这分量是不是单频。
-     * 输入悬空、信号源没接时，噪声落在测量频点上的分量照样能过幅值门限，于是屏幕
-     * 会显示一堆看着正常的 |Y|、φY —— 这里用 kappa 把它挡下来。 */
-    ui_coh = CircuitID_Coherence(ui_mag, input->ui_rms);
-    uo_coh = CircuitID_Coherence(uo_mag, input->uo_rms);
 
     /* 削波检测:统计落在 ADC 量程两端贴边区(<= 64 或 >= 65471)的样本比例。
      *
@@ -708,14 +741,6 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
             Screen_ReportError(SCREEN_E20_ADC_CLIP_UO);
         }
     }
-
-    /* 先送到串口屏（t7、t8），这样失败时也能看到两路电压与相干性。
-     * 送的是去直流后的交流有效值（RMS，单位 V），可直接与万用表、示波器的读数对照；
-     * 单频分量的峰值约等于它的 sqrt(2) 倍（相干性接近 1 时该关系成立）。
-     * 门限 CIR_INPUT_MIN_AMP / CIR_OUTPUT_MIN_AMP 用的仍是峰值码值，不在这里换算。 */
-    (void)Screen_SetDebug((float)(input->ui_rms * ADC_SAMPLER_LSB_TO_V),
-                          (float)(input->uo_rms * ADC_SAMPLER_LSB_TO_V),
-                          (float)ui_coh, (float)uo_coh);
 
     if (ui_coh < (double)CIR_MIN_COHERENCE)
     {

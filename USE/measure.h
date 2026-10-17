@@ -10,11 +10,12 @@ extern "C" {
 /*
  * 测量核心:测量频率、ADC 采样与单频 DFT、两路标定、传递函数与阻抗。
  *
- * 当前为单频点(1 kHz)测量,激励由外部信号源提供。
+ * 默认单频点(1 kHz)测量,激励由外部信号源提供;频率可由应用层调用
+ * Measure_SetFrequency() 在运行时修改(范围 100~100000 Hz)。
  *
  * 一次测量的完整链路:
  *
- *   Freq_PlanGet(k)                 取第 k 个测量频率(当前只有 1 kHz)
+ *   Measure_GetFrequency()          取当前测量频率(默认 1 kHz,可运行时改)
  *     -> Freq_SourceSet(f)          空实现:激励在外部,固件不设定
  *     -> ADC_Sampler_SetFrequency(f)  开一个采样窗口
  *          ADC1 为主、ADC2 为从的硬件同步采样,由 TIM6 TRGO 触发,一对结果打包进
@@ -23,28 +24,36 @@ extern "C" {
  *     -> ADC_Sampler_GetWindow()    取出窗口结果
  *     -> CircuitID_Compute()        算 H、Z、Y,并做两路标定修正
  *
- * 这几个环节共享同一个频率轴约定:Freq_PlanGet() 的表值既是外部信号源的应有输出,
- * 也是 DFT 旋转因子的来源;两者必须一致,否则频率轴错位且不报错。
+ * 这几个环节共享同一个频率轴约定:Measure_GetFrequency() 的值既是外部信号源的
+ * 应有输出,也是 DFT 旋转因子的来源;两者必须一致,否则频率轴错位且不报错。
  */
 
 /* ==========================================================================
  * 1. 测量频率
  * ========================================================================== */
 
-/* 测量频率个数。当前为单频点 1 kHz。 */
+/* 默认频率计划个数。当前只放一个 1 kHz 默认值;屏幕可在运行时覆盖。 */
 #define FREQ_PLAN_COUNT   1u
 
 /*
  * 保留的接口:激励源在外部(信号源直连 Ui),固件不再驱动任何 DDS。
  * 本函数当前是空实现,只为保持调用契约,实现见 measure.c 第 1 节。
  *
- * 约定:输出频率必须与 Freq_PlanGet() 的表值一致 —— DFT 的旋转因子用的是表值,
- * 两者不一致会让频率轴错位、窗口不再是整数周期(泄漏不为零),且不会有任何报错。
+ * 约定:输出频率必须与 Measure_GetFrequency() 一致 —— DFT 的旋转因子用的是
+ * 运行时频率,两者不一致会让频率轴错位、窗口不再是整数周期(泄漏不为零),
+ * 且不会有任何报错。
  */
 void Freq_SourceSet(uint32_t frequency_hz);
 
 /* 取第 index 个测量频率(0..FREQ_PLAN_COUNT-1);越界返回 0。 */
 uint32_t Freq_PlanGet(uint8_t index);
+
+/* 运行时测量频率。默认 1000 Hz;应用层收到屏幕命令后调用 Measure_SetFrequency()。
+ * 只改变固件的 DFT/窗口频率,不改变外部信号源,源必须同步到同一频率。
+ * 范围 100~100000 Hz:100 Hz 时 100 周期窗口为 1 s,主循环超时已放宽到 1500 ms;
+ * 高于 100 kHz 时窗口点数接近 ADC_SAMPLER_WINDOW_MIN,不再是整数周期。 */
+uint32_t Measure_GetFrequency(void);
+uint8_t Measure_SetFrequency(uint32_t frequency_hz);
 
 /* ==========================================================================
  * 2. ADC 采样与单频 DFT
@@ -91,7 +100,8 @@ uint32_t Freq_PlanGet(uint8_t index);
  * N = 30000 时约 0.008,相对门限 CIR_MIN_COHERENCE(0.2)有 20 倍以上余量。
  * 相比 10 个周期(3000 点),相干增益 sqrt(N) 从 55 提升到 173。
  *
- * 窗口时长 100 ms 必须明显小于主循环的等待超时(MEASURE_WAIT_TIMEOUT_MS = 500 ms)。
+ * 窗口时长 100 ms 必须明显小于主循环的等待超时(默认 1 kHz;100 Hz 时为 1 s,
+ * 所以超时取 1500 ms)。
  * 不要为提高平均深度把 CYCLES 抬到窗口时长接近该超时值,那会让每个窗口都报 E12。
  *
  * 注意:WINDOW_MIN 仅作安全下限,对 1 kHz 不生效。 */
@@ -201,14 +211,18 @@ uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out);
  * 注意:两路前端的增益不同会使 |H| 有固定偏差,靠第 3 节的标定修正。
  */
 
-/* 1：计算阻抗和导纳；0：只计算传递函数。 */
+/* 1：计算阻抗和导纳；0：只计算传递函数。
+ *
+ * 0 是合法的编译期选项：此时 FRF_Point_t 不含 Z/Y 字段，screen.c 里依赖 Y 的
+ * t1~t4 由同一宏条件编译为显示 "-"。可用工程全局宏覆盖本值，不必改源文件。 */
+#ifndef CIR_DUT_TOPOLOGY
 #define CIR_DUT_TOPOLOGY            1u
+#endif
 
-/* R 取值依据:Ui = 1 Vpp -> 幅度 ±0.5 V;ADC 范围 0~3.3 V,静态偏置
- * 1.65 V。不削顶要求 0.5*|H| < 1.5 V,取安全裕量 |H| <= 2,则 R <= 2/|Y|max
- * = 2/10 mS = 200 ohm。单挡即可覆盖 0.1~10 mS 全范围(最弱点 0.1 mS 仍约
- * 200 LSB)。1 kohm 在 10 mS 时会削顶。 */
-#define CIR_FEEDBACK_RESISTOR_OHM   200.0f
+/* 实测硬件反馈电阻为 1.5 kΩ。R 只参与 Y=-H/R 换算,不改变前端增益;
+ * 但 |H| = |Y| * R,1.5 kΩ 下 |Y| = 10 mS 时 |H| = 15,输出会削顶,
+ * 因此该值适合 |Y| 约 1 mS 以下的 DUT。大导纳需换小 R 或降低 Ui。 */
+#define CIR_FEEDBACK_RESISTOR_OHM   1500.0f
 
 /* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值只剩量化噪声，结果没有
  * 意义；这只是一道兜底门槛，"有没有信号"由下面的相干性判据负责。 */

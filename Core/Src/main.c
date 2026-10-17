@@ -39,10 +39,14 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* 单个频率等待窗口完成的超时。最长窗口是 100 Hz 的 100 ms,取 500 ms 留裕量。
+/* 单个频率等待窗口完成的超时。默认 1 kHz 时窗口 100 ms;屏幕最低档 100 Hz 时
+ * 100 周期窗口为 1 s,所以取 1500 ms 留 500 ms 裕量。
  * 注意这是墙钟时间;不要改成"循环计数",HAL_Delay(1) 因 SysTick 的 +1 分频
- * 实际可能耗 2 ms,计数式超时会翻倍。 */
-#define MEASURE_WAIT_TIMEOUT_MS   500u
+ * 实际可能耗 2 ms,计数式超时会翻倍。
+ *
+ * 再低的频率窗口会超过本超时,所以 Measure_SetFrequency() 不接受;
+ * 若以后要测更低频,必须继续放宽本超时或降低 ADC_SAMPLER_WINDOW_CYCLES。 */
+#define MEASURE_WAIT_TIMEOUT_MS   1500u
 
 /* USER CODE END PD */
 
@@ -112,7 +116,7 @@ int main(void)
   MX_TIM6_Init();
   MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
-  Screen_Init();
+  Screen_Init();                       /* 同时启动 b0(freq_change) 按键接收 */
   Screen_SetStage("PERIPH");
 
   /* 激励源在外部:信号源直接接到 Ui 节点(PA0_C),固件不驱动任何 DDS。
@@ -143,51 +147,71 @@ int main(void)
   Screen_SetStage("LOOP");
   while (1)
   {
-    uint8_t k;
+    uint32_t f;
+    ADC_Window_t window;
+    FRF_Point_t frf_point;
+    uint32_t deadline;
+    uint8_t  got = 0u;
 
-    /* 逐个取计划里的频率。当前 FREQ_PLAN_COUNT = 1(单频点 1 kHz),
-     * 所以这个循环只跑一轮;保留循环结构是为了将来恢复多频点时不用改这里。 */
-    for (k = 0u; k < FREQ_PLAN_COUNT; ++k)
+    /* 先处理屏幕按键,再取频率:按键处理里可能刚刚改了频率。 */
     {
-      uint32_t f = Freq_PlanGet(k);
-      ADC_Window_t window;
-      FRF_Point_t frf_point;
-      uint32_t deadline;
-      uint8_t  got = 0u;
+      uint32_t key_freq = Screen_TakeFreqKey();
 
-      Freq_SourceSet(f);                    /* 空实现:激励由外部信号源提供,固件不设定 */
-      (void)ADC_Sampler_SetFrequency(f);
-
-      /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */
-      deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
-      while ((int32_t)(HAL_GetTick() - deadline) < 0)
+      if (key_freq != 0u)
       {
-        if (ADC_Sampler_GetWindow(&window) != 0u)
+        (void)Measure_SetFrequency(key_freq);
+      }
+    }
+    f = Measure_GetFrequency();
+
+    /* 外部信号源必须同步到同一频率,固件只改自己的 DFT/窗口频率。 */
+    Freq_SourceSet(f);                    /* 空实现:激励由外部信号源提供,固件不设定 */
+    if (ADC_Sampler_SetFrequency(f) == 0u)
+    {
+      Screen_ReportError(SCREEN_E02_CIR_CFG);
+      Screen_ClearResult();
+      Screen_Poll();
+      HAL_Delay(10u);
+      continue;
+    }
+
+    /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */
+    deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+    while ((int32_t)(HAL_GetTick() - deadline) < 0)
+    {
+      if (ADC_Sampler_GetWindow(&window) != 0u)
+      {
+        got = 1u;
+        break;
+      }
+      {
+        uint32_t key_freq = Screen_TakeFreqKey();   /* 等待期间也能响应按键 */
+
+        if (key_freq != 0u)
         {
-          got = 1u;
-          break;
+          (void)Measure_SetFrequency(key_freq);
         }
-        Screen_Poll();
-        HAL_Delay(1u);
-      }
-
-      if (got == 0u)
-      {
-        Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
-        Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
-        continue;
-      }
-
-      if (CircuitID_Compute(&window, &frf_point) != 0u)
-      {
-        Screen_SetResult(&frf_point);
-      }
-      else
-      {
-        Screen_ClearResult();               /* 计算失败同样清掉旧读数 */
       }
       Screen_Poll();
+      HAL_Delay(1u);
     }
+
+    if (got == 0u)
+    {
+      Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
+      Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
+      continue;
+    }
+
+    if (CircuitID_Compute(&window, &frf_point) != 0u)
+    {
+      Screen_SetResult(&frf_point);
+    }
+    else
+    {
+      Screen_ClearResult();               /* 计算失败同样清掉旧读数 */
+    }
+    Screen_Poll();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

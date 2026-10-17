@@ -70,8 +70,15 @@ void Screen_Fatal(uint8_t code);
 /* 由 Error_Handler() 在关中断后调用：尝试阻塞发送致命码，然后返回。 */
 void Screen_FatalReportBlocking(void);
 
-/* 在主循环中反复调用;每 500 ms 非阻塞刷新全部 10 个文本框(t0~t9)。 */
+/* 在主循环中反复调用;每 500 ms 分条刷新 t0~t9,每条之间留 2 ms 给 HMI 重绘。
+ * t10 不参与整帧刷新,只在按键时单发。 */
 void Screen_Poll(void);
+
+/* 屏幕 b0(freq_change) 按下时发送 01 01 01。
+ * Screen_Init() 已启动 UART4 接收;主循环调用本函数取一次按键事件:
+ * 收到一次返回切换后的频率(Hz), 没有按键返回 0;读即清除。
+ * 频率按 100/300/1k/3k/10k 循环,同时更新屏幕 t10 的内容。 */
+uint32_t Screen_TakeFreqKey(void);
 
 #ifdef __cplusplus
 }

@@ -6,11 +6,12 @@
 /* 指令格式：控件名.txt="值" + 0xFF 0xFF 0xFF。 */
 #define SCREEN_CMD_END_BYTE          0xFFu
 #define SCREEN_CMD_END_COUNT         3u
-#define SCREEN_TX_BUFFER_BYTES        320u
+#define SCREEN_TX_BUFFER_BYTES        384u
 #define SCREEN_VALUE_CHARS           40u
 #define SCREEN_STAGE_CHARS           16u
-#define SCREEN_BLOCKING_TIMEOUT_MS   100u   /* 9600bps 下一条 t5 约 30ms */
+#define SCREEN_BLOCKING_TIMEOUT_MS   100u   /* 921600 下一条 t5 远小于 1ms,留足裕量 */
 #define SCREEN_STAGE_HOLD_MS         150u   /* 启动阶段肉眼保持时间 */
+#define SCREEN_CMD_GAP_MS              2u   /* 指令之间留 2ms 给 HMI 处理/重绘 */
 
 /* 致命路径有界轮询的上限。关中断后 SysTick 已停,HAL 的 tick 超时失效
  * (HAL_MAX_DELAY 永不超时,有限值也因 tick 冻结而永不到期),故这里用
@@ -60,10 +61,36 @@ static volatile uint8_t  s_fatal_code;
 static volatile uint8_t  s_fatal_latched;
 static volatile uint8_t  s_uart_ready;
 
+/* 屏幕按键接收: b0(freq_change) 发送 01 01 01。 */
+static uint8_t s_rx_byte;
+static volatile uint8_t s_rx_armed;
+static uint32_t s_rx_lockout_tick;
+static uint8_t s_ascii_key_match;
+static const char s_ascii_key[] = "010101";
+static volatile uint8_t s_freq_key_pending;
+
+/* b0 每按一次，t10 按下列顺序循环；默认显示 1k(与默认测量频率一致)。 */
+#define SCREEN_FREQ_COUNT 5u
+static const char * const s_freq_text[SCREEN_FREQ_COUNT] =
+{
+    "100", "300", "1k", "3k", "10k"
+};
+static const uint32_t s_freq_hz[SCREEN_FREQ_COUNT] =
+{
+    100u, 300u, 1000u, 3000u, 10000u
+};
+static uint8_t s_freq_index = 2u;
+
+/* t10 独立缓冲:不放进 500 ms 整帧,按键时等整帧发完再阻塞发这一条。 */
+static uint8_t s_freq_tx_buffer[24];
+
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
 static void Screen_SendStatusBlocking(const char *value, uint32_t timeout);
 static void Screen_SendStatusRaw(const char *value);
+static uint16_t Screen_BuildFreqCommand(void);
+static void Screen_SendFreqTextBlocking(void);
+static void Screen_RxStart(void);
 
 void Screen_Init(void)
 {
@@ -76,6 +103,11 @@ void Screen_Init(void)
     s_last_error_code = 0u;
     s_fatal_latched = 0u;
     s_fatal_code = SCREEN_E01_HAL_INIT;   /* 默认覆盖 MX_*_Init 内的 Error_Handler */
+    s_rx_lockout_tick = 0u;
+    s_ascii_key_match = 0u;
+    s_freq_key_pending = 0u;
+    s_freq_index = 2u;                    /* 默认 1k */
+    s_rx_armed = 0u;
     for (index = 0u; index <= SCREEN_ERROR_CODE_MAX; ++index)
     {
         s_error_counts[index] = 0u;
@@ -84,6 +116,8 @@ void Screen_Init(void)
      *   Screen_Init -> SetStage("PERIPH") -> CircuitID_Init -> SetStage("MODULE")
      * 本函数之后 PERIPH 打点会立即覆盖 s_stage。 */
     s_uart_ready = 1u;                    /* 本函数在 MX_UART4_Init 之后调用 */
+    Screen_RxStart();                     /* 开始接收 b0 按键 */
+    Screen_SendFreqTextBlocking();        /* t10 初值,之后只由按键更新 */
 }
 
 void Screen_SetResult(const FRF_Point_t *result)
@@ -224,22 +258,200 @@ static void Screen_SendStatusRaw(const char *value)
     huart4.TxXferCount = 0u;
 }
 
-/* 阻塞发送一条 t5 指令；发送前 abort 残留的 IT 传输。 */
+/* 阻塞发送一条 t5 指令；发送前清掉异常残留的 TX 状态。 */
 static void Screen_SendStatusBlocking(const char *value, uint32_t timeout)
 {
     uint16_t length = 0u;
 
     if (huart4.gState != HAL_UART_STATE_READY)
     {
-        (void)HAL_UART_Abort(&huart4);
+        /* 只中止发送,不能动 RX:本函数在启动阶段也会被调用,不能把接收一起停掉。 */
+        (void)HAL_UART_AbortTransmit(&huart4);
     }
     length = Screen_AppendCommand(length, "t5", value);
     (void)HAL_UART_Transmit(&huart4, s_tx_buffer, length, timeout);
+    if (s_rx_armed == 0u)
+    {
+        Screen_RxStart();
+    }
+}
+
+/* 启动/重启 UART4 单字节接收。主循环与 RX 回调都可能调用,用临界区防重入。 */
+static void Screen_RxStart(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    if (HAL_UART_Receive_IT(&huart4, &s_rx_byte, 1u) == HAL_OK)
+    {
+        s_rx_armed = 1u;
+    }
+    else
+    {
+        s_rx_armed = 0u;
+    }
+    __set_PRIMASK(primask);
+}
+
+/* 构造 t10 指令到 s_freq_tx_buffer,返回总长度(含 FF FF FF)。 */
+static uint16_t Screen_BuildFreqCommand(void)
+{
+    int written = snprintf((char *)s_freq_tx_buffer, sizeof(s_freq_tx_buffer),
+                           "t10.txt=\"%s\"", s_freq_text[s_freq_index]);
+    uint16_t length;
+
+    if ((written <= 0) ||
+        ((uint16_t)written + SCREEN_CMD_END_COUNT > sizeof(s_freq_tx_buffer)))
+    {
+        return 0u;
+    }
+
+    length = (uint16_t)written;
+    for (uint8_t index = 0u; index < SCREEN_CMD_END_COUNT; ++index)
+    {
+        s_freq_tx_buffer[length] = SCREEN_CMD_END_BYTE;
+        ++length;
+    }
+
+    return length;
+}
+
+/* 上电先给 t10 一个初值;之后 t10 只由按键的单发指令更新。 */
+static void Screen_SendFreqTextBlocking(void)
+{
+    uint16_t length = Screen_BuildFreqCommand();
+
+    if (length != 0u)
+    {
+        (void)HAL_UART_Transmit(&huart4, s_freq_tx_buffer, length, 50u);
+        if (s_rx_armed == 0u)
+        {
+            Screen_RxStart();
+        }
+    }
+}
+
+uint32_t Screen_TakeFreqKey(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    uint8_t pending;
+
+    __disable_irq();
+    pending = s_freq_key_pending;
+    s_freq_key_pending = 0u;
+    __set_PRIMASK(primask);
+
+    if (pending == 0u)
+    {
+        return 0u;
+    }
+
+    /* 按一次切到下一个频率。 */
+    ++s_freq_index;
+    if (s_freq_index >= SCREEN_FREQ_COUNT)
+    {
+        s_freq_index = 0u;
+    }
+
+    /* 当前整帧可能正在逐条发送;等它结束再发 t10,
+     * 不中止、不插队,不会出现半条指令或旧帧覆盖。 */
+    {
+        uint16_t length = Screen_BuildFreqCommand();
+
+        if (length != 0u)
+        {
+            uint32_t start = HAL_GetTick();
+
+            while ((huart4.gState != HAL_UART_STATE_READY) &&
+                   ((HAL_GetTick() - start) < 20u))
+            {
+                /* 等当前整帧/指令发送结束,最多 20 ms */
+            }
+
+            if (huart4.gState == HAL_UART_STATE_READY)
+            {
+                (void)HAL_UART_Transmit(&huart4, s_freq_tx_buffer, length, 10u);
+                if (s_rx_armed == 0u)
+                {
+                    Screen_RxStart();
+                }
+            }
+        }
+    }
+    s_last_tick = HAL_GetTick();
+
+    return s_freq_hz[s_freq_index];
+}
+
+/* b0(freq_change) 只认严格匹配的按键值:
+ *   1) 单字节 0x01 或连续 0x01 0x01 0x01(第一个 0x01 即触发);
+ *   2) 完整的 ASCII 字符串 "010101"。
+ * 不能看到任意 '1'(0x31) 就触发:串口屏回显/调试文本里的 "f:1000"
+ * 也含 '1',那会把整屏刷新误当成按键,导致频率和 stage 乱跳。
+ * 100 ms 内只认一次,避免 3 个 0x01 被算成多次按键。 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == UART4)
+    {
+        uint8_t ch = s_rx_byte;
+        uint8_t key_event = 0u;
+        uint32_t now;
+
+        s_rx_armed = 0u;
+
+        if (ch == 0x01u)
+        {
+            key_event = 1u;
+            s_ascii_key_match = 0u;
+        }
+        else if (ch == (uint8_t)s_ascii_key[s_ascii_key_match])
+        {
+            ++s_ascii_key_match;
+            if (s_ascii_key_match >= 6u)
+            {
+                s_ascii_key_match = 0u;
+                key_event = 1u;
+            }
+        }
+        else
+        {
+            s_ascii_key_match = (ch == (uint8_t)s_ascii_key[0]) ? 1u : 0u;
+        }
+
+        if (key_event != 0u)
+        {
+            now = HAL_GetTick();
+            if ((int32_t)(now - s_rx_lockout_tick) >= 0)
+            {
+                s_freq_key_pending = 1u;
+                s_rx_lockout_tick = now + 100u;
+            }
+        }
+
+        Screen_RxStart();
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == UART4)
+    {
+        __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF |
+                                     UART_CLEAR_FEF | UART_CLEAR_PEF);
+        s_rx_lockout_tick = 0u;
+        s_ascii_key_match = 0u;
+        Screen_RxStart();
+    }
 }
 
 void Screen_Poll(void)
 {
     uint16_t length;
+
+    if (s_rx_armed == 0u)
+    {
+        Screen_RxStart();
+    }
 
     if ((HAL_GetTick() - s_last_tick) < SCREEN_REFRESH_PERIOD_MS)
     {
@@ -250,17 +462,58 @@ void Screen_Poll(void)
     /* 心跳在任何路径下都递增，包括 UART 忙的周期。 */
     s_beat++;
 
-    /* 上一条还没发完则跳过本周期，不阻塞主循环。 */
-    if (huart4.gState != HAL_UART_STATE_READY)
+    length = Screen_BuildCommands();
+    if (length == 0u)
     {
-        Screen_ReportError(SCREEN_E11_UART_BUSY);
         return;
     }
 
-    length = Screen_BuildCommands();
-    if (HAL_UART_Transmit_IT(&huart4, s_tx_buffer, length) != HAL_OK)
+    /* 一条一条阻塞发,每条之间留 2 ms 给 HMI 解析和重绘。
+     * 921600 下一次性灌 10 条会让屏幕把整页重画,看起来像"卡一下";
+     * 分开送,每条都能被及时处理。 */
     {
-        Screen_ReportError(SCREEN_E10_UART_TX);
+        uint16_t pos = 0u;
+
+        while (pos < length)
+        {
+            uint16_t end = length;
+            uint16_t index;
+
+            for (index = pos; (uint16_t)(index + 2u) < length; ++index)
+            {
+                if ((s_tx_buffer[index] == SCREEN_CMD_END_BYTE) &&
+                    (s_tx_buffer[index + 1u] == SCREEN_CMD_END_BYTE) &&
+                    (s_tx_buffer[index + 2u] == SCREEN_CMD_END_BYTE))
+                {
+                    end = (uint16_t)(index + 3u);
+                    break;
+                }
+            }
+
+            if (end <= pos)
+            {
+                break;
+            }
+
+            if (HAL_UART_Transmit(&huart4, &s_tx_buffer[pos],
+                                  (uint16_t)(end - pos), 10u) != HAL_OK)
+            {
+                Screen_ReportError(SCREEN_E10_UART_TX);
+                break;
+            }
+
+            /* 阻塞发送期间 HAL 锁会让 RX 回调里的重挂失败;发完立刻补挂。 */
+            if (s_rx_armed == 0u)
+            {
+                Screen_RxStart();
+            }
+
+            pos = end;
+            if (pos < length)
+            {
+                HAL_Delay(SCREEN_CMD_GAP_MS);
+            }
+        }
     }
 }
 
@@ -302,6 +555,7 @@ static uint16_t Screen_BuildCommands(void)
     }
     length = Screen_AppendCommand(length, "t0", value);
 
+#if CIR_DUT_TOPOLOGY == 1u
     /* t1:|Y| (mS) */
     if (s_has_result != 0u)
     {
@@ -348,6 +602,13 @@ static uint16_t Screen_BuildCommands(void)
         (void)snprintf(value, sizeof(value), "B:-");
     }
     length = Screen_AppendCommand(length, "t4", value);
+#else
+    /* CIR_DUT_TOPOLOGY = 0:只计算 H,FRF_Point_t 没有 Y 字段,四行固定显示 "-"。 */
+    length = Screen_AppendCommand(length, "t1", "Y:-");
+    length = Screen_AppendCommand(length, "t2", "P:-");
+    length = Screen_AppendCommand(length, "t3", "G:-");
+    length = Screen_AppendCommand(length, "t4", "B:-");
+#endif
 
     /* t7、t8:窗口诊断量（电压单位 V，k 为相干性）。计算失败时也会更新，所以"没信号"
      * 时这里能看到两路本底电压有多大、相干性有多低。 */
@@ -378,6 +639,9 @@ static uint16_t Screen_BuildCommands(void)
         (void)snprintf(value, sizeof(value), "H:-");
     }
     length = Screen_AppendCommand(length, "t9", value);
+
+    /* t10 不放进 500 ms 整屏帧:它只在按键时单发。
+     * 否则按键后正在发送的旧帧会把 t10 又改回上一个值。 */
 
     /* t6:心跳,每刷新周期 +1 */
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);

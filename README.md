@@ -2,11 +2,11 @@
 
 ## 1. 工程用途
 
-本工程运行在 **STM32H750XBH6** 上。主循环按 `measure.c` 第 1 节的测量频率设定激励:当前为**单频点 1 kHz**,激励由**外部信号源**直接加到 `Ui` 节点(板上原 DDS 已移除,见第 12 节)。STM32 用两路 ADC 同时采集 DUT 的电压 `Ui` 和电流转换后的电压 `Uo`,在该频率上做单频 DFT,计算导纳 `|Y|`、φY、G、B,并把结果显示在串口屏上。
+本工程运行在 **STM32H750XBH6** 上。主循环按 `Measure_GetFrequency()` 的频率测量:默认为 **1 kHz**,可由应用层调用 `Measure_SetFrequency()` 修改;激励由**外部信号源**直接加到 `Ui` 节点(板上原 DDS 已移除,见第 12 节)。STM32 用两路 ADC 同时采集 DUT 的电压 `Ui` 和电流转换后的电压 `Uo`,在该频率上做单频 DFT,计算导纳 `|Y|`、φY、G、B,并把结果显示在串口屏上。
 
 主要功能：
 
-- 测量频率为**单频点 1 kHz**(`FREQ_PLAN_COUNT = 1`);激励由外部信号源提供,固件不驱动任何 DDS
+- 默认测量频率为 **1 kHz**;可由应用层调用 `Measure_SetFrequency()` 在 100~100000 Hz 内修改。激励由外部信号源提供,固件不驱动任何 DDS
 - ADC1、ADC2 硬件同步采样(PA0_C、PA1_C,主从同步模式),由 TIM6 触发,结果打包进 CDR、DMA 循环写入缓冲区
 - 每个频率开一个采样窗口，对两路做单频 DFT，得到 `Ui`、`Uo` 的复数分量
 - 传递函数 `H = Uo / Ui`，阻抗 `Z = -R / H`，导纳 `Y = -H / R`
@@ -77,7 +77,7 @@ H  = Uo / Ui = -Y × R
           Screen_Poll()               ── 每 500 ms 通过 UART4 刷新串口屏
 ```
 
-主循环逐个取 `Freq_PlanGet(k)` 的频率。当前 `FREQ_PLAN_COUNT = 1`,所以每轮只测 1 kHz,循环结构保留以便将来恢复多频点。窗口完成后调用计算函数,成功(返回 1)才更新显示;失败或超时会清掉结果,屏幕显示 "-" 而不是上一轮的陈旧读数。
+主循环取 `Measure_GetFrequency()` 的频率,默认 1000 Hz。`Freq_PlanGet()` 的表只保留默认值/标定基准;屏幕按键由 `screen.c` 接收并置位,应用层用 `Screen_TakeFreqKey()` 取到后决定是否调用 `Measure_SetFrequency()` 改频。窗口完成后调用计算函数,成功(返回 1)才更新显示;失败或超时会清掉结果,屏幕显示 "-" 而不是上一轮的陈旧读数。
 
 ## 5. 计算方法
 
@@ -96,7 +96,7 @@ fs = 300 kHz（TIM6 触发频率）
 
 取 100 个周期(而非更少)是为了压低噪声底:相干性判据的噪声底 κ ≈ sqrt(2/N),N = 30000 时约 **0.008**,相对门限 `CIR_MIN_COHERENCE`(0.2)有 20 倍以上余量;相干增益 sqrt(N) ≈ 173。
 
-⚠️ 窗口时长必须明显小于主循环的等待超时(`MEASURE_WAIT_TIMEOUT_MS` = 500 ms)。当前 100 ms 安全;若把 `ADC_SAMPLER_WINDOW_CYCLES` 抬到窗口接近 500 ms,每个窗口都会报 E12。
+⚠️ 窗口时长必须明显小于主循环的等待超时(`MEASURE_WAIT_TIMEOUT_MS` = 1500 ms)。当前 1 kHz 时 100 ms、100 Hz 时 1 s 都安全;若把 `ADC_SAMPLER_WINDOW_CYCLES` 抬到窗口接近 1500 ms,每个窗口都会报 E12。
 
 ```text
 ω = 2π f / fs
@@ -113,6 +113,8 @@ x̄ 为窗口内的平均值（去除直流）
 ```
 
 `|U|` 低于 `CIR_INPUT_MIN_AMP` 报 E04，低于 `CIR_OUTPUT_MIN_AMP` 报 E05。两个门限都是占位值，待实测确定。
+
+### 5.2 相干性判据
 
 幅值门限只说明"这个频点上有多少能量"，说不出这些能量是不是来自信号源，所以另有一个与信号绝对大小无关的相干性判据：
 
@@ -149,7 +151,7 @@ H_im   = (Uo_im·Ui_re − Uo_re·Ui_im) / |Ui|²
 
 ### 5.4 频率
 
-测量频率由 `measure.c` 第 1 节的表给出(当前:单频点 1 kHz)。
+测量频率由 `Measure_GetFrequency()` 给出(默认 1 kHz;可在 100~100000 Hz 内改)。
 
 ### 5.5 阻抗 Z 和导纳 Y（`CIR_DUT_TOPOLOGY = 1` 时计算）
 
@@ -185,7 +187,7 @@ Z 或 Y 的任一结果非有限，报 E09 并丢弃。
 
 | 字段 | 含义 | 单位 |
 |---|---|---|
-| `frequency_hz` | 测量频率(来自 `Freq_PlanGet()`) | Hz |
+| `frequency_hz` | 测量频率(来自 `Measure_GetFrequency()`) | Hz |
 | `h_magnitude_dB` / `h_phase_deg` | 传递函数增益和相位 | dB / ° |
 | `z_mag_ohm` / `z_phase_deg` | 阻抗幅值和相位 | Ω / ° |
 | `y_mag_siemens` / `y_phase_deg` | 导纳幅值和相位 | S / ° |
@@ -239,7 +241,7 @@ PA4 原先用作 DDS 的软件片选,现未使用,`.ioc` 里不分配。
 
 ## 7. 串口屏
 
-UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 10 条指令（t0~t9），每条以 `FF FF FF` 结尾。串口屏页面需要建立同名文本框 `t0`~`t8`。
+UART4，921600 8N1，PC10 TX / PC11 RX。每 500 ms 发送整屏指令（t0~t9），每条以 `FF FF FF` 结尾；`t10` 单独在按键时发送。串口屏页面需要建立同名文本框 `t0`~`t9`，以及按键档位显示 `t10`。
 
 | 控件 | 内容 | 示例 |
 |---|---|---|
@@ -253,6 +255,9 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 10 条指令（t0~t9）
 | `t6` | 心跳，每刷新周期 +1 | `beat:1234` |
 | `t7` | 窗口诊断：`Ui` 交流有效值（V）与相干性 kappa | `Ui:0.1234V k:0.98`，尚无窗口时 `Ui:-` |
 | `t8` | 窗口诊断：`Uo` 交流有效值（V）与相干性 kappa | `Uo:0.0988V k:0.97`，尚无窗口时 `Uo:-` |
+
+> `t1`~`t4` 依赖 Z/Y。把 `CIR_DUT_TOPOLOGY` 设为 0（只算 H）时固件仍可编译，
+> 这四行固定显示 `-`。
 
 ### 7.1 运行阶段
 
@@ -293,12 +298,28 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 10 条指令（t0~t9）
 
 时钟配置失败发生在 UART 就绪之前，屏幕无法显示，未纳入错误码表，只能用调试器定位。
 
+### 7.3 自定义测量频率按键
+
+屏幕 `b0`（`freq_change`）的**按下事件**发送 3 个十六进制字节：
+
+```text
+printh 010101
+```
+
+即 `0x01 0x01 0x01`。接收代码在 `USE/screen.c`：
+
+- `Screen_Init()` 在 `MX_UART4_Init()` 之后启动 UART4 单字节接收中断；
+- 主循环调用 `Screen_TakeFreqKey()`，每收到一次按键，`t10` 按 `100 / 300 / 1k / 3k / 10k` 循环切到下一档，并返回该档频率（Hz）；没有按键返回 0，读即清除；
+- 主循环把返回值交给 `Measure_SetFrequency()`，同时刷新 DFT/窗口频率。
+
+`Measure_SetFrequency()` 的范围是 100~100000 Hz；外部信号源必须同步到同一频率。100 Hz 档的 100 周期窗口为 1 s，`MEASURE_WAIT_TIMEOUT_MS` 已放宽到 1500 ms。建议选 `300000/f` 为整数的频点（100、300、1k、3k、5k、6k、10k 等），否则窗口不是整数周期，单频 DFT 会有泄漏。
+
 ## 8. 已知限制
 
 - **窗口泄漏。** Fs = 300 kHz 下测量频率 1 kHz 的窗口是整数个周期(见 5.1 节),理论上泄漏为零;残余误差只来自晶振频率偏差与外部信号源实际输出与标称值的偏差。
 - **两路增益未标定。** 两路 ADC 的增益误差会直接进入 `H`。见第 11 节。
 - **两路输入路径有差异。** ADC1/ADC2 工作在规则组同步模式（见 10.2 节），采样时刻完全相同；残余相位误差来自 PA0_C/PA1_C 两个模拟开关与源阻抗的带宽差异（第 11 节第 2 点）。
-- **每轮测量要等一个完整的窗口(100 ms)。** 窗口未完成就拿不到结果。超时上限是 `MEASURE_WAIT_TIMEOUT_MS`(500 ms),窗口时长必须明显小于它。
+- **每轮测量要等一个完整的窗口。** 1 kHz 时 100 ms,100 Hz 时 1 s;窗口未完成就拿不到结果。超时上限是 `MEASURE_WAIT_TIMEOUT_MS`(1500 ms),窗口时长必须明显小于它。
 - **幅值门限是占位值。** `CIR_INPUT_MIN_AMP`、`CIR_OUTPUT_MIN_AMP` 为 4 个码值，需要用实际噪声水平确定。这两道门限只保证"有不小的交流分量"，判断"信号源是不是真的在驱动被测电路"靠相干性判据 `CIR_MIN_COHERENCE`（见 5.2 节），它不需要现场标定。
 - **外部信号源的频率精度不在固件控制内。** 激励由外部信号源提供,固件无法校验其实际频率。若源偏离 1 kHz,DFT 会在错误频率上取分量,表现为 κ 下降或相位误差,而屏幕上与"DUT 特性"无法区分。请使用频率精度足够的信号源,或先用示波器/频率计校验。
 
@@ -319,8 +340,8 @@ UART4，9600 8N1，PC10 TX / PC11 RX。每 500 ms 发送 10 条指令（t0~t9）
 3. `.ioc` 与 `spi.c` 中 SPI1 仍为主机、16 位、CPOL=High / CPHA=1Edge(Mode 2)、软件 NSS、波特率预分频 8;SPI1 不使用 DMA 和中断。当前 SPI1 无从设备。
 4. `spi.c` 的 MspInit 只配置 PB5/PG9/PG11 三根 SPI1 引脚,不碰 PA4。
 5. `main.c` 的 USER CODE 区不调用任何 DDS 驱动(激励源在外部,`Freq_SourceSet()` 是空实现)。
-6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Freq_PlanGet()`/`Freq_SourceSet()` 和 `Screen_Poll()`。
-7. `.ioc` 中 UART4 仍为 9600 8N1（PC10/PC11），且 UART4 全局中断已使能。
+6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Measure_GetFrequency()`/`Freq_SourceSet()`、`Screen_TakeFreqKey()` 和 `Screen_Poll()`。
+7. `.ioc` 中 UART4 为 921600 8N1（PC10/PC11），且 UART4 全局中断已使能；HMI 工程波特率必须同为 921600。
 8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发,ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`;`.ioc` 的 `Dma.ADC1.2` 对齐为 **Word**(`DMA_*DATAALIGN_WORD`),与同步模式的 32 位 CDR 一致。
 9. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`。
 10. `adc.c` 的双 ADC 同步配置(`ADC_DUALMODE_REGSIMULT`、`DualModeData`、`TwoSamplingDelay`)**已放在 `USER CODE BEGIN ADC1_Init 2` 区**,CubeMX 重新生成不会覆盖,无需再手工改回;`.ioc` 里没有多模式选项属于正常现象。ADC1 的 DMA 字对齐同上。
@@ -402,7 +423,7 @@ ADC 是单端 0~65535,超出量程的样本会被钳在边界上。**削平后�
 
 - 通道映射（PA0_C → INP0，PA1_C → INP1）依据工程原有配置和 ST 社区资料，请以 CubeMX 引脚列表为准。
 - 采样速率 300 kHz 是按测量频率 1 kHz 的整数周期条件选定的(见 5.1 节)。需要其他速率时,要同时改 TIM6 的 PSC/ARR、`ADC_SAMPLER_RATE_HZ` **和 `.ioc` 里的 TIM6**,否则用 CubeMX 重新生成代码会把硬件触发率改回去,导致频率轴静默错位。
-- 窗口覆盖 100 个信号周期(N = 30000 点 / 100 ms)和上下限是初始值,需要结合实测调整;调整时必须保证窗口时长远小于 `MEASURE_WAIT_TIMEOUT_MS`(500 ms)。
+- 窗口覆盖 100 个信号周期(N = 30000 点 / 100 ms)和上下限是初始值,需要结合实测调整;调整时必须保证窗口时长远小于 `MEASURE_WAIT_TIMEOUT_MS`(1500 ms)。
 - 双 ADC 同步模式没有体现在 `.ioc` 里(`.ioc` 只有 `ADC1.master=1`,没有多模式选项),但配置已放进 `adc.c` 的 `USER CODE` 区,重新生成不会丢失;`.ioc` 的 DMA 对齐也已同步为 Word。若该配置仍因故失效,`ADC_Sampler_Init()` 的回读校验会报 E16 而不是静默降级(见 10.2 节)。
 
 ## 11. 标定方法
@@ -472,6 +493,6 @@ SPI1 仍然初始化,但不连接任何从设备。现有参数:
 关键约束:
 
 - **波形:** 正弦。谐波会污染单频 DFT 的结果。
-- **频率:** 必须与 `Freq_PlanGet()` 的表值一致(当前 1 kHz)。固件**无法校验**这一点 —— 源频率偏离会表现为 κ 下降或相位误差,与“DUT 特性”在屏幕上无法区分(见第 8 节)。
+- **频率:** 必须与 `Measure_GetFrequency()` 一致(默认 1 kHz)。固件**无法校验**这一点 —— 源频率偏离会表现为 κ 下降或相位误差,与“DUT 特性”在屏幕上无法区分(见第 8 节)。
 - **直流电平:** `Ui` 与运放虚地(反相端)的直流电位必须一致。若不一致,DUT 上会压着直流而产生直流电流灌入跨阻放大器,轻则吃掉动态范围,重则使 `Uo` 削顶。削顶会被固件检出并报 **E19/E20**(见 10.4 节),但那时 `|Y|`、φY、G、B 已经不可信了 —— 报错只是告诉你"这次读数不能要"。
 - **幅度:** 由前端电路的量程决定,不受固件约束(代码只检查幅值下限 `CIR_INPUT_MIN_AMP` / `CIR_OUTPUT_MIN_AMP`,以及上限的削波检测)。`Uo` 不削顶仍是结果可信的前提。
