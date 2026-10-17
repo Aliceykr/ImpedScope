@@ -364,6 +364,9 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
     }
 
     s_active_freq_hz = frequency_hz;
+    /* 强制下一轮 Screen_Poll 立即刷新,把上一频率的 t0~t9 结果清成 "-",
+     * 避免 t10 已经显示新频率、t0 还挂着旧频率的读数。 */
+    s_last_tick = HAL_GetTick() - SCREEN_REFRESH_PERIOD_MS;
     if (s_rx_armed == 0u)
     {
         Screen_RxStart();
