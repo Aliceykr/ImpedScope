@@ -241,7 +241,7 @@ PA4 原先用作 DDS 的软件片选,现未使用,`.ioc` 里不分配。
 
 ## 7. 串口屏
 
-UART4，921600 8N1，PC10 TX / PC11 RX。每 500 ms 发送整屏指令（t0~t9），每条以 `FF FF FF` 结尾；`t10` 单独在按键时发送。串口屏页面需要建立同名文本框 `t0`~`t9`，以及按键档位显示 `t10`。
+UART4，921600 8N1，PC10 TX / PC11 RX。每 500 ms 发送整屏指令（t0~t9），每条以 `FF FF FF` 结尾；`t10` 不参与整帧，只在测量频率真正切换时发送。串口屏页面需要建立同名文本框 `t0`~`t9`，以及当前测量频率显示 `t10`。
 
 | 控件 | 内容 | 示例 |
 |---|---|---|
@@ -308,9 +308,9 @@ printh 010101
 
 即 `0x01 0x01 0x01`。接收代码在 `USE/screen.c`：
 
-- `Screen_Init()` 在 `MX_UART4_Init()` 之后启动 UART4 单字节接收中断；
-- 主循环调用 `Screen_TakeFreqKey()`，每收到一次按键，`t10` 按 `100 / 300 / 1k / 3k / 10k` 循环切到下一档，并返回该档频率（Hz）；没有按键返回 0，读即清除；
-- 主循环把返回值交给 `Measure_SetFrequency()`，同时刷新 DFT/窗口频率。
+- `Screen_Init()` 在 `MX_UART4_Init()` 之后启动 UART4 单字节接收中断，并先用 1 kHz 初始化 `t10`；
+- 主循环调用 `Screen_TakeFreqKey()`，每收到一次按键，目标档位按 `100 / 300 / 1k / 3k / 10k` 循环，返回下一档频率（Hz）；没有按键返回 0，读即清除；
+- 主循环把返回值交给 `Measure_SetFrequency()`；`ADC_Sampler_SetFrequency()` 真正按新频率开窗后，再调用 `Screen_SetActiveFreq()` 更新 `t10`，并清掉上一频率的结果。这样 `t10` 显示的永远是**当前正在测量**的频率，而不是刚按下、还没生效的目标频率。
 
 `Measure_SetFrequency()` 的范围是 100~100000 Hz；外部信号源必须同步到同一频率。100 Hz 档的 100 周期窗口为 1 s，`MEASURE_WAIT_TIMEOUT_MS` 已放宽到 1500 ms。建议选 `300000/f` 为整数的频点（100、300、1k、3k、5k、6k、10k 等），否则窗口不是整数周期，单频 DFT 会有泄漏。
 
@@ -340,7 +340,7 @@ printh 010101
 3. `.ioc` 与 `spi.c` 中 SPI1 仍为主机、16 位、CPOL=High / CPHA=1Edge(Mode 2)、软件 NSS、波特率预分频 8;SPI1 不使用 DMA 和中断。当前 SPI1 无从设备。
 4. `spi.c` 的 MspInit 只配置 PB5/PG9/PG11 三根 SPI1 引脚,不碰 PA4。
 5. `main.c` 的 USER CODE 区不调用任何 DDS 驱动(激励源在外部,`Freq_SourceSet()` 是空实现)。
-6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Measure_GetFrequency()`/`Freq_SourceSet()`、`Screen_TakeFreqKey()` 和 `Screen_Poll()`。
+6. `main.c` 的 USER CODE 区仍调用 `Screen_Init()`、`Screen_SetStage()`、`ADC_Sampler_Init()`、`CircuitID_Init()`、`Measure_GetFrequency()`/`Freq_SourceSet()`、`Screen_TakeFreqKey()`、`Screen_SetActiveFreq()` 和 `Screen_Poll()`。
 7. `.ioc` 中 UART4 为 921600 8N1（PC10/PC11），且 UART4 全局中断已使能；HMI 工程波特率必须同为 921600。
 8. `.ioc` 中 ADC1、ADC2 均为单通道、连续转换关闭、DMA 循环、由 TIM6 TRGO 触发,ADC 时钟分频为 `ADC_CLOCK_ASYNC_DIV2`;`.ioc` 的 `Dma.ADC1.2` 对齐为 **Word**(`DMA_*DATAALIGN_WORD`),与同步模式的 32 位 CDR 一致。
 9. `main.c` 的 USER CODE 区在 `MX_TIM6_Init()` 之后调用 `ADC_Sampler_Init()`。

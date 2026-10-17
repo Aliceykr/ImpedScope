@@ -79,17 +79,17 @@ static const uint32_t s_freq_hz[SCREEN_FREQ_COUNT] =
 {
     100u, 300u, 1000u, 3000u, 10000u
 };
-static uint8_t s_freq_index = 2u;
+static uint8_t s_freq_index = 2u;          /* 按键选中的目标档位 */
+static uint32_t s_active_freq_hz;          /* 当前真正在测量的频率,决定 t10 */
 
-/* t10 独立缓冲:不放进 500 ms 整帧,按键时等整帧发完再阻塞发这一条。 */
+/* t10 独立缓冲:不放进 500 ms 整帧,只在测量频率真正切换时发。 */
 static uint8_t s_freq_tx_buffer[24];
 
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
 static void Screen_SendStatusBlocking(const char *value, uint32_t timeout);
 static void Screen_SendStatusRaw(const char *value);
-static uint16_t Screen_BuildFreqCommand(void);
-static void Screen_SendFreqTextBlocking(void);
+static uint16_t Screen_BuildFreqCommand(uint8_t index);
 static void Screen_RxStart(void);
 
 void Screen_Init(void)
@@ -106,7 +106,8 @@ void Screen_Init(void)
     s_rx_lockout_tick = 0u;
     s_ascii_key_match = 0u;
     s_freq_key_pending = 0u;
-    s_freq_index = 2u;                    /* 默认 1k */
+    s_freq_index = 2u;                    /* 目标默认 1k */
+    s_active_freq_hz = 0u;                /* 0 = 尚未显示/尚未生效 */
     s_rx_armed = 0u;
     for (index = 0u; index <= SCREEN_ERROR_CODE_MAX; ++index)
     {
@@ -117,7 +118,7 @@ void Screen_Init(void)
      * 本函数之后 PERIPH 打点会立即覆盖 s_stage。 */
     s_uart_ready = 1u;                    /* 本函数在 MX_UART4_Init 之后调用 */
     Screen_RxStart();                     /* 开始接收 b0 按键 */
-    Screen_SendFreqTextBlocking();        /* t10 初值,之后只由按键更新 */
+    (void)Screen_SetActiveFreq(1000u);    /* t10 初值 = 默认测量频率 1 kHz */
 }
 
 void Screen_SetResult(const FRF_Point_t *result)
@@ -293,13 +294,19 @@ static void Screen_RxStart(void)
     __set_PRIMASK(primask);
 }
 
-/* 构造 t10 指令到 s_freq_tx_buffer,返回总长度(含 FF FF FF)。 */
-static uint16_t Screen_BuildFreqCommand(void)
+/* 构造指定档位的 t10 指令到 s_freq_tx_buffer,返回总长度(含 FF FF FF)。 */
+static uint16_t Screen_BuildFreqCommand(uint8_t index)
 {
-    int written = snprintf((char *)s_freq_tx_buffer, sizeof(s_freq_tx_buffer),
-                           "t10.txt=\"%s\"", s_freq_text[s_freq_index]);
+    int written;
     uint16_t length;
 
+    if (index >= SCREEN_FREQ_COUNT)
+    {
+        return 0u;
+    }
+
+    written = snprintf((char *)s_freq_tx_buffer, sizeof(s_freq_tx_buffer),
+                       "t10.txt=\"%s\"", s_freq_text[index]);
     if ((written <= 0) ||
         ((uint16_t)written + SCREEN_CMD_END_COUNT > sizeof(s_freq_tx_buffer)))
     {
@@ -307,7 +314,7 @@ static uint16_t Screen_BuildFreqCommand(void)
     }
 
     length = (uint16_t)written;
-    for (uint8_t index = 0u; index < SCREEN_CMD_END_COUNT; ++index)
+    for (uint8_t i = 0u; i < SCREEN_CMD_END_COUNT; ++i)
     {
         s_freq_tx_buffer[length] = SCREEN_CMD_END_BYTE;
         ++length;
@@ -316,19 +323,53 @@ static uint16_t Screen_BuildFreqCommand(void)
     return length;
 }
 
-/* 上电先给 t10 一个初值;之后 t10 只由按键的单发指令更新。 */
-static void Screen_SendFreqTextBlocking(void)
+uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
 {
-    uint16_t length = Screen_BuildFreqCommand();
+    uint8_t index;
+    uint16_t length;
+    uint32_t start;
 
-    if (length != 0u)
+    for (index = 0u; index < SCREEN_FREQ_COUNT; ++index)
     {
-        (void)HAL_UART_Transmit(&huart4, s_freq_tx_buffer, length, 50u);
-        if (s_rx_armed == 0u)
+        if (s_freq_hz[index] == frequency_hz)
         {
-            Screen_RxStart();
+            break;
         }
     }
+    if ((index >= SCREEN_FREQ_COUNT) || (frequency_hz == s_active_freq_hz))
+    {
+        return 0u;
+    }
+
+    length = Screen_BuildFreqCommand(index);
+    if (length == 0u)
+    {
+        return 0u;
+    }
+
+    start = HAL_GetTick();
+    while ((huart4.gState != HAL_UART_STATE_READY) &&
+           ((HAL_GetTick() - start) < 20u))
+    {
+        /* 等当前发送结束,最多 20 ms */
+    }
+    if (huart4.gState != HAL_UART_STATE_READY)
+    {
+        return 0u;
+    }
+
+    if (HAL_UART_Transmit(&huart4, s_freq_tx_buffer, length, 10u) != HAL_OK)
+    {
+        return 0u;
+    }
+
+    s_active_freq_hz = frequency_hz;
+    if (s_rx_armed == 0u)
+    {
+        Screen_RxStart();
+    }
+
+    return 1u;
 }
 
 uint32_t Screen_TakeFreqKey(void)
@@ -346,39 +387,13 @@ uint32_t Screen_TakeFreqKey(void)
         return 0u;
     }
 
-    /* 按一次切到下一个频率。 */
+    /* 只切目标档位;t10 等 ADC 真正切到该频率后再由
+     * Screen_SetActiveFreq() 更新。 */
     ++s_freq_index;
     if (s_freq_index >= SCREEN_FREQ_COUNT)
     {
         s_freq_index = 0u;
     }
-
-    /* 当前整帧可能正在逐条发送;等它结束再发 t10,
-     * 不中止、不插队,不会出现半条指令或旧帧覆盖。 */
-    {
-        uint16_t length = Screen_BuildFreqCommand();
-
-        if (length != 0u)
-        {
-            uint32_t start = HAL_GetTick();
-
-            while ((huart4.gState != HAL_UART_STATE_READY) &&
-                   ((HAL_GetTick() - start) < 20u))
-            {
-                /* 等当前整帧/指令发送结束,最多 20 ms */
-            }
-
-            if (huart4.gState == HAL_UART_STATE_READY)
-            {
-                (void)HAL_UART_Transmit(&huart4, s_freq_tx_buffer, length, 10u);
-                if (s_rx_armed == 0u)
-                {
-                    Screen_RxStart();
-                }
-            }
-        }
-    }
-    s_last_tick = HAL_GetTick();
 
     return s_freq_hz[s_freq_index];
 }

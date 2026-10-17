@@ -175,6 +175,13 @@ int main(void)
       continue;
     }
 
+    /* ADC 已按 f 开始新窗口,这时才让 t10 显示 f。
+     * 若显示频率变了,清掉上一频率的读数,避免 t0~t9 还是旧频率的结果。 */
+    if (Screen_SetActiveFreq(f) != 0u)
+    {
+      Screen_ClearResult();
+    }
+
     /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */
     deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
     while ((int32_t)(HAL_GetTick() - deadline) < 0)

@@ -76,9 +76,15 @@ void Screen_Poll(void);
 
 /* 屏幕 b0(freq_change) 按下时发送 01 01 01。
  * Screen_Init() 已启动 UART4 接收;主循环调用本函数取一次按键事件:
- * 收到一次返回切换后的频率(Hz), 没有按键返回 0;读即清除。
- * 频率按 100/300/1k/3k/10k 循环,同时更新屏幕 t10 的内容。 */
+ * 收到一次返回下一档目标频率(Hz), 没有按键返回 0;读即清除。
+ * 本函数只改“目标档位”,不立即改 t10;t10 由 Screen_SetActiveFreq()
+ * 在目标频率真正开始测量时更新,保证显示频率=当前测量频率。 */
 uint32_t Screen_TakeFreqKey(void);
+
+/* 目标频率已经由 ADC_Sampler_SetFrequency() 生效后调用。
+ * 若 frequency_hz 是五个档位之一且与当前显示不同,发送 t10 并返回 1;
+ * 相同或不是档位值返回 0。 */
+uint8_t Screen_SetActiveFreq(uint32_t frequency_hz);
 
 #ifdef __cplusplus
 }
