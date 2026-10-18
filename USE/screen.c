@@ -61,7 +61,7 @@ static volatile uint8_t  s_fatal_code;
 static volatile uint8_t  s_fatal_latched;
 static volatile uint8_t  s_uart_ready;
 
-/* 屏幕按键接收: b0(freq_change) 发送 01 01 01。 */
+/* 屏幕按键接收: b0(freq_change) 发送 01 01 01,现在作为强制刷新键。 */
 static uint8_t s_rx_byte;
 static volatile uint8_t s_rx_armed;
 static uint32_t s_rx_lockout_tick;
@@ -69,27 +69,18 @@ static uint8_t s_ascii_key_match;
 static const char s_ascii_key[] = "010101";
 static volatile uint8_t s_freq_key_pending;
 
-/* b0 每按一次，t10 按下列顺序循环；默认显示 1k(与默认测量频率一致)。 */
+/* 自动扫描的五个候选频率,仅用于校验/记录当前测量频率。 */
 #define SCREEN_FREQ_COUNT 5u
-static const char * const s_freq_text[SCREEN_FREQ_COUNT] =
-{
-    "100", "300", "1k", "3k", "10k"
-};
 static const uint32_t s_freq_hz[SCREEN_FREQ_COUNT] =
 {
     100u, 300u, 1000u, 3000u, 10000u
 };
-static uint8_t s_freq_index = 2u;          /* 按键选中的目标档位 */
-static uint32_t s_active_freq_hz;          /* 当前真正在测量的频率,决定 t10 */
-
-/* t10 独立缓冲:不放进 500 ms 整帧,只在测量频率真正切换时发。 */
-static uint8_t s_freq_tx_buffer[24];
+static uint32_t s_active_freq_hz;          /* 当前真正在测量的频率 */
 
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
 static void Screen_SendStatusBlocking(const char *value, uint32_t timeout);
 static void Screen_SendStatusRaw(const char *value);
-static uint16_t Screen_BuildFreqCommand(uint8_t index);
 static void Screen_RxStart(void);
 
 void Screen_Init(void)
@@ -106,8 +97,7 @@ void Screen_Init(void)
     s_rx_lockout_tick = 0u;
     s_ascii_key_match = 0u;
     s_freq_key_pending = 0u;
-    s_freq_index = 2u;                    /* 目标默认 1k */
-    s_active_freq_hz = 0u;                /* 0 = 尚未显示/尚未生效 */
+    s_active_freq_hz = 0u;                /* 0 = 尚未生效 */
     s_rx_armed = 0u;
     for (index = 0u; index <= SCREEN_ERROR_CODE_MAX; ++index)
     {
@@ -118,7 +108,7 @@ void Screen_Init(void)
      * 本函数之后 PERIPH 打点会立即覆盖 s_stage。 */
     s_uart_ready = 1u;                    /* 本函数在 MX_UART4_Init 之后调用 */
     Screen_RxStart();                     /* 开始接收 b0 按键 */
-    (void)Screen_SetActiveFreq(1000u);    /* t10 初值 = 默认测量频率 1 kHz */
+    (void)Screen_SetActiveFreq(1000u);    /* 默认测量频率 1 kHz */
 }
 
 void Screen_SetResult(const FRF_Point_t *result)
@@ -179,6 +169,14 @@ void Screen_ReportError(uint8_t code)
     }
     s_error_counts[code]++;
     s_last_error_code = code;
+}
+
+void Screen_ClearError(void)
+{
+    if (s_fatal_latched == 0u)
+    {
+        s_last_error_code = 0u;
+    }
 }
 
 void Screen_Fatal(uint8_t code)
@@ -294,40 +292,9 @@ static void Screen_RxStart(void)
     __set_PRIMASK(primask);
 }
 
-/* 构造指定档位的 t10 指令到 s_freq_tx_buffer,返回总长度(含 FF FF FF)。 */
-static uint16_t Screen_BuildFreqCommand(uint8_t index)
-{
-    int written;
-    uint16_t length;
-
-    if (index >= SCREEN_FREQ_COUNT)
-    {
-        return 0u;
-    }
-
-    written = snprintf((char *)s_freq_tx_buffer, sizeof(s_freq_tx_buffer),
-                       "t10.txt=\"%s\"", s_freq_text[index]);
-    if ((written <= 0) ||
-        ((uint16_t)written + SCREEN_CMD_END_COUNT > sizeof(s_freq_tx_buffer)))
-    {
-        return 0u;
-    }
-
-    length = (uint16_t)written;
-    for (uint8_t i = 0u; i < SCREEN_CMD_END_COUNT; ++i)
-    {
-        s_freq_tx_buffer[length] = SCREEN_CMD_END_BYTE;
-        ++length;
-    }
-
-    return length;
-}
-
 uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
 {
     uint8_t index;
-    uint16_t length;
-    uint32_t start;
 
     for (index = 0u; index < SCREEN_FREQ_COUNT; ++index)
     {
@@ -341,31 +308,11 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
         return 0u;
     }
 
-    length = Screen_BuildFreqCommand(index);
-    if (length == 0u)
-    {
-        return 0u;
-    }
-
-    start = HAL_GetTick();
-    while ((huart4.gState != HAL_UART_STATE_READY) &&
-           ((HAL_GetTick() - start) < 20u))
-    {
-        /* 等当前发送结束,最多 20 ms */
-    }
-    if (huart4.gState != HAL_UART_STATE_READY)
-    {
-        return 0u;
-    }
-
-    if (HAL_UART_Transmit(&huart4, s_freq_tx_buffer, length, 10u) != HAL_OK)
-    {
-        return 0u;
-    }
-
     s_active_freq_hz = frequency_hz;
-    /* 强制下一轮 Screen_Poll 立即刷新,把上一频率的 t0~t9 结果清成 "-",
-     * 避免 t10 已经显示新频率、t0 还挂着旧频率的读数。 */
+    /* 档位切换后,上一档的“最近错误”不再适用。 */
+    s_last_error_code = 0u;
+    /* 强制下一轮 Screen_Poll 立即刷新结果区。t10 现在显示 H 相位,
+     * 由 500 ms 整帧统一更新,不再在这里单发。 */
     s_last_tick = HAL_GetTick() - SCREEN_REFRESH_PERIOD_MS;
     if (s_rx_armed == 0u)
     {
@@ -375,7 +322,7 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
     return 1u;
 }
 
-uint32_t Screen_TakeFreqKey(void)
+uint8_t Screen_TakeRefreshKey(void)
 {
     uint32_t primask = __get_PRIMASK();
     uint8_t pending;
@@ -385,20 +332,7 @@ uint32_t Screen_TakeFreqKey(void)
     s_freq_key_pending = 0u;
     __set_PRIMASK(primask);
 
-    if (pending == 0u)
-    {
-        return 0u;
-    }
-
-    /* 只切目标档位;t10 等 ADC 真正切到该频率后再由
-     * Screen_SetActiveFreq() 更新。 */
-    ++s_freq_index;
-    if (s_freq_index >= SCREEN_FREQ_COUNT)
-    {
-        s_freq_index = 0u;
-    }
-
-    return s_freq_hz[s_freq_index];
+    return (pending != 0u) ? 1u : 0u;
 }
 
 /* b0(freq_change) 只认严格匹配的按键值:
@@ -649,8 +583,8 @@ static uint16_t Screen_BuildCommands(void)
      * 所以单独显示一行。*/
     if (s_has_result != 0u)
     {
-        (void)snprintf(value, sizeof(value), "H:%.2fdB A:%.2f",
-                       (double)s_result.h_magnitude_dB, (double)s_result.h_phase_deg);
+        (void)snprintf(value, sizeof(value), "H:%.2fdB",
+                       (double)s_result.h_magnitude_dB);
     }
     else
     {
@@ -658,8 +592,17 @@ static uint16_t Screen_BuildCommands(void)
     }
     length = Screen_AppendCommand(length, "t9", value);
 
-    /* t10 不放进 500 ms 整屏帧:它只在按键时单发。
-     * 否则按键后正在发送的旧帧会把 t10 又改回上一个值。 */
+    /* t10:原来这里是频率档位,自动检测后 f: 已经显示频率;
+     * 空出来显示被 t9 截断的 H 相位。 */
+    if (s_has_result != 0u)
+    {
+        (void)snprintf(value, sizeof(value), "A:%.2f", (double)s_result.h_phase_deg);
+    }
+    else
+    {
+        (void)snprintf(value, sizeof(value), "A:-");
+    }
+    length = Screen_AppendCommand(length, "t10", value);
 
     /* t6:心跳,每刷新周期 +1 */
     (void)snprintf(value, sizeof(value), "beat:%lu", (unsigned long)s_beat);

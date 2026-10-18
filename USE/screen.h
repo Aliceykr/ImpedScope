@@ -64,6 +64,10 @@ void Screen_SetStage(const char *stage);
 /* 非致命错误上报：只记录计数，中断安全。 */
 void Screen_ReportError(uint8_t code);
 
+/* 清除最近一次非致命错误，使 t5 回到 stage。每个新窗口开始计算前调用；
+ * 若本窗口又出错，Screen_ReportError() 会重新置位。 */
+void Screen_ClearError(void);
+
 /* 致命错误：锁定 t5 显示并进入 Error_Handler()。 */
 void Screen_Fatal(uint8_t code);
 
@@ -76,14 +80,12 @@ void Screen_Poll(void);
 
 /* 屏幕 b0(freq_change) 按下时发送 01 01 01。
  * Screen_Init() 已启动 UART4 接收;主循环调用本函数取一次按键事件:
- * 收到一次返回下一档目标频率(Hz), 没有按键返回 0;读即清除。
- * 本函数只改“目标档位”,不立即改 t10;t10 由 Screen_SetActiveFreq()
- * 在目标频率真正开始测量时更新,保证显示频率=当前测量频率。 */
-uint32_t Screen_TakeFreqKey(void);
+ * 有按键返回 1,没有返回 0;读即清除。
+ * 现在按钮不再切换频率,只作为“强制重新扫描/测量”的刷新键。 */
+uint8_t Screen_TakeRefreshKey(void);
 
-/* 目标频率已经由 ADC_Sampler_SetFrequency() 生效后调用。
- * 若 frequency_hz 是五个档位之一且与当前显示不同,发送 t10 并返回 1;
- * 相同或不是档位值返回 0。 */
+/* 自动扫描选定频率后调用,只更新当前测量频率、清掉上一频率结果并强制刷新；
+ * 不再发送 t10；t10 现在显示 H 的相位。 */
 uint8_t Screen_SetActiveFreq(uint32_t frequency_hz);
 
 #ifdef __cplusplus

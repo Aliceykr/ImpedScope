@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Includes */
 #include "measure.h"
 #include "screen.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,11 +67,94 @@ void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
-
+static uint32_t FreqScan_Select(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* 外部信号源只会在 100/300/1k/3k/10k 五档之间切换。
+ * 依次用五个候选频率开一个 DFT 窗口，按 Ui 的单频幅值和相干性选最可信的一档。
+ * 候选顺序把常用的 1k、10k 放前面; 命中一个高相干候选就提前结束。
+ * 返回选中的频率; 五档都没有可信信号时返回 0, 并保持默认 1 kHz。 */
+static uint32_t FreqScan_Select(void)
+{
+  static const uint32_t candidates[] = { 1000u, 10000u, 3000u, 300u, 100u };
+  uint32_t best_f = 0u;
+  double   best_score = 0.0;
+  uint8_t  i;
+
+  Screen_ClearResult();
+
+  for (i = 0u; i < (uint8_t)(sizeof(candidates) / sizeof(candidates[0u])); ++i)
+  {
+    uint32_t     f = candidates[i];
+    uint32_t     deadline;
+    uint8_t      got = 0u;
+    ADC_Window_t window;
+
+    if (ADC_Sampler_SetFrequency(f) == 0u)
+    {
+      continue;
+    }
+
+    deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+    while ((int32_t)(HAL_GetTick() - deadline) < 0)
+    {
+      if (ADC_Sampler_GetWindow(&window) != 0u)
+      {
+        got = 1u;
+        break;
+      }
+      Screen_Poll();
+      HAL_Delay(1u);
+    }
+
+    if ((got == 0u) || (window.sample_count == 0u))
+    {
+      continue;
+    }
+
+    {
+      double n = (double)window.sample_count;
+      double ui_mag = 2.0 * sqrt((window.ui_re * window.ui_re) +
+                                 (window.ui_im * window.ui_im)) / n;
+      double ui_coh = 0.0;
+      double score;
+
+      if (window.ui_rms > 0.0)
+      {
+        ui_coh = ui_mag / (1.41421356237 * window.ui_rms);
+      }
+
+      score = ui_mag * ui_coh;
+      if ((ui_mag > (double)CIR_INPUT_MIN_AMP) && (ui_coh > 0.5) &&
+          (score > best_score))
+      {
+        best_score = score;
+        best_f = f;
+
+        /* 相干性接近 1, 已经确定是这一档, 不必再等更低的候选频率。 */
+        if (ui_coh > 0.95)
+        {
+          break;
+        }
+      }
+    }
+  }
+
+  if (best_f == 0u)
+  {
+    (void)Measure_SetFrequency(1000u);
+    (void)ADC_Sampler_SetFrequency(1000u);
+    return 0u;
+  }
+
+  (void)Measure_SetFrequency(best_f);
+  (void)ADC_Sampler_SetFrequency(best_f);
+  (void)Screen_SetActiveFreq(best_f);
+  return best_f;
+}
 
 /* USER CODE END 0 */
 
@@ -140,11 +224,22 @@ int main(void)
     }
   }
   Screen_SetStage("SCAN");
+  {
+    uint32_t detected = FreqScan_Select();
+
+    Screen_SetStage("LOOP");
+    if (detected == 0u)
+    {
+      Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+    }
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  Screen_SetStage("LOOP");
+  {
+  uint8_t scan_fail_count = 0u;
+
   while (1)
   {
     uint32_t f;
@@ -153,15 +248,23 @@ int main(void)
     uint32_t deadline;
     uint8_t  got = 0u;
 
-    /* 先处理屏幕按键,再取频率:按键处理里可能刚刚改了频率。 */
+    /* HMI 的 b0(freq_change) 现在作为“强制刷新”：
+     * 按下后立刻重新扫描五档并重测，不再用硬件复位。 */
+    if ((Screen_TakeRefreshKey() != 0u) || (scan_fail_count >= 3u))
     {
-      uint32_t key_freq = Screen_TakeFreqKey();
-
-      if (key_freq != 0u)
+      Screen_SetStage("SCAN");
+      if (FreqScan_Select() != 0u)
       {
-        (void)Measure_SetFrequency(key_freq);
+        Screen_SetStage("LOOP");
       }
+      else
+      {
+        Screen_SetStage("LOOP");
+        Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+      }
+      scan_fail_count = 0u;
     }
+
     f = Measure_GetFrequency();
 
     /* 外部信号源必须同步到同一频率,固件只改自己的 DFT/窗口频率。 */
@@ -170,6 +273,7 @@ int main(void)
     {
       Screen_ReportError(SCREEN_E02_CIR_CFG);
       Screen_ClearResult();
+      ++scan_fail_count;
       Screen_Poll();
       HAL_Delay(10u);
       continue;
@@ -191,14 +295,6 @@ int main(void)
         got = 1u;
         break;
       }
-      {
-        uint32_t key_freq = Screen_TakeFreqKey();   /* 等待期间也能响应按键 */
-
-        if (key_freq != 0u)
-        {
-          (void)Measure_SetFrequency(key_freq);
-        }
-      }
       Screen_Poll();
       HAL_Delay(1u);
     }
@@ -207,21 +303,29 @@ int main(void)
     {
       Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
       Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
+      ++scan_fail_count;
       continue;
     }
+
+    /* 新窗口开始计算前清掉上一窗口的错误显示；若本窗口仍异常，
+     * CircuitID_Compute() 会通过 Screen_ReportError() 重新置位。 */
+    Screen_ClearError();
 
     if (CircuitID_Compute(&window, &frf_point) != 0u)
     {
       Screen_SetResult(&frf_point);
+      scan_fail_count = 0u;
     }
     else
     {
       Screen_ClearResult();               /* 计算失败同样清掉旧读数 */
+      ++scan_fail_count;
     }
     Screen_Poll();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+  }
   }
   /* USER CODE END 3 */
 }
