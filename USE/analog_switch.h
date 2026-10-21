@@ -1,0 +1,121 @@
+#ifndef ANALOG_SWITCH_H
+#define ANALOG_SWITCH_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "main.h"
+
+/*
+ * 74HC4052 反馈电阻切换（4 档自动量程）
+ *
+ * 拓扑（与手绘图一致，开关在输出侧）：
+ *
+ *   运放输出 Uo ── X（COM）
+ *                    │
+ *         X0    X1    X2    X3
+ *         │     │     │     │
+ *       27Ω   270Ω  2.7k  27k
+ *         └─────┴──┬──┴─────┘
+ *                  │
+ *            运放反相端（虚地 1.65 V）
+ *
+ * 公共端接运放输出，四个掷端各接一只反馈电阻，四只电阻另一端共接虚地。
+ * 这样切换时的电荷注入被低阻输出吸收，不会直接打进虚地节点。
+ *
+ * 四只电阻的推导（任务书：Re/Im/|Y| 0.1–10 mS、误差 ≤10%，φY ≤5%）：
+ *
+ *   1) 10 mS 时 DUT 电流 I = Ui × 10 mS，与选哪一档无关；Uo = I × (R + Ron)。
+ *      要保证 Uo ≤ 1.5 V，R + Ron ≤ 1.5 V / I。
+ *   2) Ui = 1 V 时 I = 10 mA，Ron ≈ 100 Ω → R ≤ 50 Ω，取 27 Ω：
+ *        R_eff = 127 Ω，Uo = 1.27 V（留 15% 余量），覆盖 4–10 mS 上段。
+ *   3) Ui = 0.35 V 时 I = 3.5 mA，R + Ron ≤ 429 Ω，取 270 Ω：
+ *        R_eff = 370 Ω，Uo = 1.295 V（留 14% 余量），覆盖 1.16–11.6 mS，
+ *        10 mS 由这一档承担，27 Ω 档不必选中，Ron 占比从 79% 降到 27%。
+ *   4) 其余两档按 10 倍间距取 2.7 kΩ / 27 kΩ：
+ *        R_eff = 2.8 kΩ / 27.1 kΩ，覆盖 0.153–1.53 mS / 15.8–158 µS。
+ *   5) 三档（270 Ω / 2.7 k / 27 k）在 Ui = 0.35 V 下连续覆盖约 16 µS–11.6 mS，
+ *      0.1–10 mS 全程在指标内；27 Ω 档保留用于 Ui = 1 V 的 4–10 mS 上段。
+ *
+ * 结论：27 / 270 / 2.7 k / 27 k 是 E24 常用值、10 倍间距，且在 Ui = 1 V
+ * 和 Ui = 0.35 V 两种激励下都能覆盖 0.1–10 mS。推荐工作点 Ui ≈ 0.35 V：
+ * 270 Ω 档承担 10 mS，Ron 只占 27%，10% 指标有充分余量。
+ *
+ * Ron 在 3.3 V 下约 100 Ω（不同厂商 80–150 Ω），以实测为准；s_ohm_eff[]
+ * 里的默认值已按 标称值 + 100 Ω 预估，标定后用 Switch_SetCalibratedOhm()
+ * 覆盖。若实测 Ron 明显偏大（>150 Ω），Ui = 1 V / 10 mS 可能放不进 1.5 V，
+ * 需要改用低 Ron 开关或降低 Ui。
+ */
+
+/* 1 = 启用自动量程；0 = 退回固定反馈电阻（CIR_FEEDBACK_RESISTOR_OHM），
+ * 便于在不装 4052 的板子上做回归测试。 */
+#define SW_ENABLE           1u
+
+#define SW_COUNT            4u
+
+/* 换档后等待时间：4052 建立时间 + 运放退出饱和。10 ms 对 100 ms 窗口占 10%，
+ * 对 100 Hz 的 1 s 窗口占 1%，可以接受。 */
+#define SW_SETTLE_MS        10u
+
+/* 3.3 V 下 4052 的 Ron 估算值，仅用于默认 R_eff；实际以标定为准。 */
+#define SW_RON_NOMINAL      100.0f
+
+/* 换档门限（相对 1.65 V 偏置的峰值电压）：
+ *   预测下一档 ≤ 1.32 V 才升档（留 12% 余量到 1.5 V）；
+ *   当前档 > 1.43 V 立即降档。 */
+#define SW_UO_UP_V          1.32f
+#define SW_UO_DOWN_V        1.43f
+
+/* 削波判据：贴边样本占比 > 1%（千分之 10）即认为 Uo 削顶。 */
+#define SW_CLIP_PERMILLE    10u
+
+/* 4052 控制脚：A = bit0，B = bit1；00/01/10/11 → 27/270/2.7k/27k。
+ * 板上若引出的是别的焊盘，只改这四个宏，同时同步 9_30.ioc。 */
+#define SW_A_PORT           GPIOE
+#define SW_A_PIN            GPIO_PIN_2
+#define SW_B_PORT           GPIOE
+#define SW_B_PIN            GPIO_PIN_3
+
+typedef enum
+{
+    SW_RANGE_27 = 0,    /* 27 Ω  + Ron，Ui = 1 V 时的 4–10 mS 上段 */
+    SW_RANGE_270,       /* 270 Ω + Ron，Ui = 0.35 V 时覆盖 10 mS */
+    SW_RANGE_2K7,       /* 2.7 kΩ + Ron */
+    SW_RANGE_27K        /* 27 kΩ + Ron */
+} Switch_Range_t;
+
+/* 初始化 PE2/PE3 为推挽输出，并切到 27 Ω（最小增益，Uo 最低）。
+ * 必须在 ADC 启动前调用；内部会等 SW_SETTLE_MS。 */
+void Switch_Init(void);
+
+/* 切到指定档。index 越界返回 0；与当前档相同也返回 0（不重复等建立时间）。
+ * 返回 1 表示实际切换并已完成建立。 */
+uint8_t Switch_Set(uint8_t index);
+
+/* 当前档位（0..SW_COUNT-1）。 */
+uint8_t Switch_Get(void);
+
+/* 当前档的反馈电阻（Ω，含 Ron 与标定修正）。CircuitID 用它计算 Y/Z。 */
+float Switch_GetOhm(void);
+
+/* 第 index 档的标称电阻（Ω，不含 Ron），用于标定和显示。 */
+float Switch_GetNominalOhm(uint8_t index);
+
+/* 写入第 index 档的实测 R_eff（Ω）。标定时使用；默认值 = 标称 + Ron。 */
+void Switch_SetCalibratedOhm(uint8_t index, float ohm);
+
+/* 根据当前测得 Uo 峰值电压，推荐“不削顶的最大档”。
+ * 只做计算，不切档；返回推荐档位（0..SW_COUNT-1）。 */
+uint8_t Switch_Recommend(float uo_peak_v);
+
+/* 运行时换档：削波或 Uo 过高立即降档；预测下一档 ≤ 1.32 V 时升档，
+ * 升档需连续 2 个窗口确认（滞回）。返回 1 表示已切档，调用方应丢弃
+ * 当前结果、同步 CircuitID 的 R 并重开窗口。 */
+uint8_t Switch_Update(float uo_peak_v, uint32_t clip_count, uint32_t sample_count);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* ANALOG_SWITCH_H */

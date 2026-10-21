@@ -442,6 +442,30 @@ uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out)
     return ready;
 }
 
+uint8_t ADC_Sampler_Restart(void)
+{
+    uint32_t start;
+    uint32_t primask;
+
+    if (s_target == 0u)
+    {
+        return 0u;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    /* 从当前块序号重新开始，保留频率、步进和窗口长度。 */
+    start = s_acc.blocks;
+    s_ready = 0u;
+    s_ovr_discard = 0u;
+    ADC_Sampler_ResetAcc(&s_acc, start);
+
+    __set_PRIMASK(primask);
+
+    return 1u;
+}
+
 /* 前半块填满。同步模式下只有主 ADC（ADC1）的 DMA 在跑。 */
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
@@ -636,9 +660,26 @@ static uint8_t Calib_Apply(float frequency_hz, double *h_re, double *h_im)
 static uint8_t CircuitID_IsFinite(double value);
 static double CircuitID_Coherence(double magnitude, double rms);
 
+/* 运行时反馈电阻（Ω）。默认取 CIR_FEEDBACK_RESISTOR_OHM，启用 analog_switch
+ * 后由应用层在每次换档后调用 CircuitID_SetFeedbackResistor() 覆盖。 */
+static float s_r_feedback = CIR_FEEDBACK_RESISTOR_OHM;
+
 void CircuitID_Init(void)
 {
     /* 当前为单频窗口模式，暂时没有运行时状态。 */
+}
+
+void CircuitID_SetFeedbackResistor(float ohm)
+{
+    if (ohm > 0.0f)
+    {
+        s_r_feedback = ohm;
+    }
+}
+
+float CircuitID_GetFeedbackResistor(void)
+{
+    return s_r_feedback;
 }
 
 /* 相干性 kappa = 单频幅值 / (sqrt(2) * 交流有效值)。
@@ -675,7 +716,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
 
     (void)memset(output, 0, sizeof(*output));
 
-    if (CIR_FEEDBACK_RESISTOR_OHM <= 0.0f)
+    if (s_r_feedback <= 0.0f)
     {
         Screen_ReportError(SCREEN_E02_CIR_CFG);
         return 0u;
@@ -809,7 +850,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     }
 
     {
-        double r = (double)CIR_FEEDBACK_RESISTOR_OHM;
+        double r = (double)s_r_feedback;
         double z_re;
         double z_im;
         double z_magnitude;
@@ -825,7 +866,7 @@ uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output)
     }
 
     {
-        double r = (double)CIR_FEEDBACK_RESISTOR_OHM;
+        double r = (double)s_r_feedback;
         double y_re;
         double y_im;
         double y_magnitude;

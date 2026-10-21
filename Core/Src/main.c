@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Includes */
 #include "measure.h"
 #include "screen.h"
+#include "analog_switch.h"
 #include <math.h>
 /* USER CODE END Includes */
 
@@ -68,10 +69,30 @@ void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
 static uint32_t FreqScan_Select(void);
+static float Window_UoPeakV(const ADC_Window_t *window);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* 一个窗口的 Uo 单频分量峰值电压（V）。与 CircuitID_Compute 里的 uo_mag 同源：
+ *   |Uo| = 2*sqrt(re^2+im^2)/N（ADC 码值），再乘 LSB→V。
+ * 量程判断只看基波，不用 RMS，避免谐波/噪声把峰值抬高。 */
+static float Window_UoPeakV(const ADC_Window_t *window)
+{
+  double n;
+  double mag;
+
+  if ((window == (const ADC_Window_t *)0) || (window->sample_count == 0u))
+  {
+    return 0.0f;
+  }
+
+  n = (double)window->sample_count;
+  mag = 2.0 * sqrt((window->uo_re * window->uo_re) +
+                   (window->uo_im * window->uo_im)) / n;
+  return (float)(mag * (double)ADC_SAMPLER_LSB_TO_V);
+}
 
 /* 外部信号源只会在 100/300/1k/3k/10k 五档之间切换。
  * 依次用五个候选频率开一个 DFT 窗口，按 Ui 的单频幅值和相干性选最可信的一档。
@@ -207,6 +228,12 @@ int main(void)
    * 因此这里没有信号源初始化步骤;SPI1 仍然初始化但不再有从设备。 */
 
   CircuitID_Init();
+
+  /* 反馈电阻量程：先切到 27 Ω（最低增益），再把 R_eff 交给 CircuitID。
+   * 必须在 ADC_Sampler_Init() 之前完成，避免第一个窗口用错档。 */
+  Switch_Init();
+  CircuitID_SetFeedbackResistor(Switch_GetOhm());
+
   Screen_SetStage("MODULE");
 
   {
@@ -239,6 +266,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   {
   uint8_t scan_fail_count = 0u;
+  uint8_t range_ready     = 0u;
 
   while (1)
   {
@@ -253,6 +281,7 @@ int main(void)
     if ((Screen_TakeRefreshKey() != 0u) || (scan_fail_count >= 3u))
     {
       Screen_SetStage("SCAN");
+      range_ready = 0u;                  /* 频率变了，量程要重新选 */
       if (FreqScan_Select() != 0u)
       {
         Screen_SetStage("LOOP");
@@ -305,6 +334,39 @@ int main(void)
       Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
       ++scan_fail_count;
       continue;
+    }
+
+    /* 量程选择：换档会改变 R_eff，所以必须在计算 H/Z/Y 之前完成。
+     * 上电/换频后的第一个窗口：按比例直接跳到“不削顶的最大档”，
+     * 换档后重开窗口，用新档再测一次，不把旧档的结果送显示。 */
+    {
+      float    uo_peak_v = Window_UoPeakV(&window);
+      uint32_t uo_clip   = window.clip.uo_low + window.clip.uo_high;
+
+      if (range_ready == 0u)
+      {
+        uint8_t target = Switch_Recommend(uo_peak_v);
+
+        if (target != Switch_Get())
+        {
+          (void)Switch_Set(target);
+          CircuitID_SetFeedbackResistor(Switch_GetOhm());
+          Screen_ClearResult();
+          (void)ADC_Sampler_Restart();
+          continue;
+        }
+        range_ready = 1u;
+      }
+
+      /* 运行时换档：削波/过幅立即降档；预测下一档仍安全则连续两窗后升档。
+       * 换档瞬间的样本不可信，丢弃并重开窗口。 */
+      if (Switch_Update(uo_peak_v, uo_clip, window.sample_count) != 0u)
+      {
+        CircuitID_SetFeedbackResistor(Switch_GetOhm());
+        Screen_ClearResult();
+        (void)ADC_Sampler_Restart();
+        continue;
+      }
     }
 
     /* 新窗口开始计算前清掉上一窗口的错误显示；若本窗口仍异常，

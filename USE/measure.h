@@ -197,6 +197,10 @@ uint8_t ADC_Sampler_SetFrequency(uint32_t frequency_hz);
 /* 取出最近完成的窗口;没有新窗口时返回 0。 */
 uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out);
 
+/* 以当前频率强制重开一个窗口（同频也重开）。没有设定过频率时返回 0。
+ * 换档后调用，丢弃切换瞬间的样本。 */
+uint8_t ADC_Sampler_Restart(void);
+
 /* ==========================================================================
  * 3. 传递函数 H、阻抗 Z、导纳 Y
  * ========================================================================== */
@@ -219,9 +223,9 @@ uint8_t ADC_Sampler_GetWindow(ADC_Window_t *out);
 #define CIR_DUT_TOPOLOGY            1u
 #endif
 
-/* 实测硬件反馈电阻为 1.5 kΩ。R 只参与 Y=-H/R 换算,不改变前端增益;
- * 但 |H| = |Y| * R,1.5 kΩ 下 |Y| = 10 mS 时 |H| = 15,输出会削顶,
- * 因此该值适合 |Y| 约 1 mS 以下的 DUT。大导纳需换小 R 或降低 Ui。 */
+/* 旧固定反馈电阻（1.5 kΩ）。启用 analog_switch 模块后，应用层会在运行时
+ * 调用 CircuitID_SetFeedbackResistor() 覆盖它；本宏只在 SW_ENABLE=0 时作为
+ * 默认值使用。R 只参与 Y=-H/R 换算，不改变前端增益。 */
 #define CIR_FEEDBACK_RESISTOR_OHM   1500.0f
 
 /* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值只剩量化噪声，结果没有
@@ -262,6 +266,11 @@ typedef struct
 
 /* 初始化频响辨识模块。当前无状态需要初始化。 */
 void CircuitID_Init(void);
+
+/* 运行时反馈电阻（Ω，含 Ron 与标定修正）。切换量程后由应用层调用；
+ * <=0 时 CircuitID_Compute() 报 E02（CIR_CFG）。 */
+void  CircuitID_SetFeedbackResistor(float ohm);
+float CircuitID_GetFeedbackResistor(void);
 
 /* 由一个窗口的 Ui、Uo 计算 H、Z、Y(含标定修正)；成功且结果有效时返回 1，否则返回 0。 */
 uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output);
