@@ -229,7 +229,7 @@ int main(void)
 
   CircuitID_Init();
 
-  /* 反馈电阻量程：先切到 27 Ω（最低增益），再把 R_eff 交给 CircuitID。
+  /* 反馈电阻量程：先切到 150 Ω（最低增益），再把 R_eff 交给 CircuitID。
    * 必须在 ADC_Sampler_Init() 之前完成，避免第一个窗口用错档。 */
   Switch_Init();
   CircuitID_SetFeedbackResistor(Switch_GetOhm());
