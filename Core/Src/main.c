@@ -30,6 +30,7 @@
 #include "measure.h"
 #include "screen.h"
 #include "analog_switch.h"
+#include "uart_debug.h"
 #include <math.h>
 /* USER CODE END Includes */
 
@@ -217,12 +218,16 @@ int main(void)
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_UART4_Init();
+  MX_USART3_UART_Init();
   MX_ADC1_Init();
   MX_TIM6_Init();
   MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
   Screen_Init();                       /* 同时启动 b0(freq_change) 按键接收 */
   Screen_SetStage("PERIPH");
+
+  UartDebug_Init();
+  UartDebug_Printf("BOOT 9_30 debug uart 921600\r\n");
 
   /* 激励源在外部:信号源直接接到 Ui 节点(PA0_C),固件不驱动任何 DDS。
    * 因此这里没有信号源初始化步骤;SPI1 仍然初始化但不再有从设备。 */
@@ -376,6 +381,7 @@ int main(void)
     if (CircuitID_Compute(&window, &frf_point) != 0u)
     {
       Screen_SetResult(&frf_point);
+      UartDebug_LogMeasurement(&frf_point, &window, Switch_Get());
       scan_fail_count = 0u;
     }
     else

@@ -613,6 +613,11 @@
               <FileType>1</FileType>
               <FilePath>../USE/analog_switch.c</FilePath>
             </File>
+            <File>
+              <FileName>uart_debug.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../USE/uart_debug.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

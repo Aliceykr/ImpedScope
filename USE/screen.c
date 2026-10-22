@@ -1,4 +1,5 @@
 #include "screen.h"
+#include "uart_debug.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -393,6 +394,12 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         s_rx_lockout_tick = 0u;
         s_ascii_key_match = 0u;
         Screen_RxStart();
+    }
+    else if (huart->Instance == USART3)
+    {
+        __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF |
+                                     UART_CLEAR_FEF | UART_CLEAR_PEF);
+        UartDebug_OnError();
     }
 }
 
