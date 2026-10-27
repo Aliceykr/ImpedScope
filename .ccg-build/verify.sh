@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=39
-EXPECT_CODE=51314
+EXPECT_CODE=51322
 CODE_TOL=400
 fail=0
 

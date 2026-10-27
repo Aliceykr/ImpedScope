@@ -260,75 +260,54 @@ if (key_event != 0u)
 }
 ```
 
-#### (c) 判定函数（替换 `screen.c:328-339` 的 `Screen_TakeRefreshKey`）
+#### (c) 判定函数（替换 `screen.c` 的 `Screen_TakeRefreshKey`）
 
 ```c
 Screen_KeyEvent_t Screen_PollKey(void)
 {
     Screen_KeyEvent_t event = SCREEN_KEY_NONE;
     uint32_t primask;
-    uint8_t  count;
-    uint32_t first_tick;
-    uint32_t last_tick;
+    uint32_t now;
 
+    /* 读快照与改队列必须在同一个临界区内完成：
+     * 若分成两段，两次临界区之间的按键会被误清（ISR 里 ++s_click_count）。
+     * 审查修订：原方案的 ClickReset / ClickKeepLast 两个小工具已并入本函数。 */
     primask = __get_PRIMASK();
     __disable_irq();
-    count      = s_click_count;
-    first_tick = s_click_first_tick;
-    last_tick  = s_click_last_tick;
-    __set_PRIMASK(primask);
 
-    if (count >= 2u)
+    now = HAL_GetTick();
+    if (s_click_count >= 2u)
     {
-        if ((uint32_t)(last_tick - first_tick) <= SCREEN_DOUBLE_CLICK_MS)
+        if ((uint32_t)(s_click_last_tick - s_click_first_tick) <= SCREEN_DOUBLE_CLICK_MS)
         {
             /* 两下都在窗口内：双击，队列清空。 */
-            Screen_ClickReset();
+            s_click_count      = 0u;
+            s_click_first_tick = 0u;
+            s_click_last_tick  = 0u;
             event = SCREEN_KEY_DOUBLE;
         }
         else
         {
             /* 两下隔太久：第一下算单击，第二下留作新的待定单击。 */
-            Screen_ClickKeepLast();
+            s_click_count      = 1u;
+            s_click_first_tick = s_click_last_tick;
             event = SCREEN_KEY_SINGLE;
         }
     }
-    else if (count == 1u)
+    else if (s_click_count == 1u)
     {
-        if ((uint32_t)(HAL_GetTick() - last_tick) > SCREEN_DOUBLE_CLICK_MS)
+        if ((uint32_t)(now - s_click_last_tick) > SCREEN_DOUBLE_CLICK_MS)
         {
             /* 窗口过期，没有第二下：单击。 */
-            Screen_ClickReset();
+            s_click_count      = 0u;
+            s_click_first_tick = 0u;
+            s_click_last_tick  = 0u;
             event = SCREEN_KEY_SINGLE;
         }
     }
 
+    __set_PRIMASK(primask);
     return event;
-}
-```
-
-两个私有小工具（放在 `Screen_PollKey` 之前）：
-
-```c
-static void Screen_ClickReset(void)
-{
-    uint32_t primask = __get_PRIMASK();
-
-    __disable_irq();
-    s_click_count      = 0u;
-    s_click_first_tick = 0u;
-    s_click_last_tick  = 0u;
-    __set_PRIMASK(primask);
-}
-
-static void Screen_ClickKeepLast(void)
-{
-    uint32_t primask = __get_PRIMASK();
-
-    __disable_irq();
-    s_click_count      = 1u;
-    s_click_first_tick = s_click_last_tick;
-    __set_PRIMASK(primask);
 }
 ```
 
@@ -470,7 +449,7 @@ void Screen_FlushRange(void)
 | `USE/relay_range.h` | 新增 `Relay_Set()` / `Relay_Next()` 声明 |
 | `USE/relay_range.c` | 实现这两个函数（约 25 行） |
 | `USE/screen.h` | 新增 `SCREEN_DOUBLE_CLICK_MS`、`Screen_KeyEvent_t`、`Screen_PollKey()`、`Screen_FlushRange()`；删除 `Screen_TakeRefreshKey()`；修两条过期注释 |
-| `USE/screen.c` | 状态变量换成点击队列；ISR 只记时间戳；新增 `Screen_PollKey()` / `Screen_ClickReset()` / `Screen_ClickKeepLast()` / `Screen_FlushRange()` |
+| `USE/screen.c` | 状态变量换成点击队列；ISR 只记时间戳；新增 `Screen_PollKey()` / `Screen_FlushRange()`（判定与改队列在单一临界区内完成，无 ClickReset/ClickKeepLast 小工具） |
 | `Core/Src/main.c` | 主循环按键分支拆成"双击切档 / 单击重扫" |
 | `README.md` | §5 流程、§8.2（删掉"不做运行期切档"的说法）、§9 按键说明、§12 参数表、§15 限制、§17 待上板 |
 | `PLAN-继电器三档量程.md` | §11「明确不做」里"无 `Relay_Set()`、不做运行期切档"要改成"已被 `PLAN-双击切档.md` 取代" |

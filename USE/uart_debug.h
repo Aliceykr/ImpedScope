@@ -39,7 +39,7 @@ void UartDebug_Write(const uint8_t *data, uint16_t length);
 void UartDebug_Printf(const char *format, ...);
 
 /* 输出一行测量值：f、|Y|、phiY、G、B、H、R、档位、Ui/Uo。
- * range_index 映射：0=150 Ω、1=1.5 kΩ、2=15 kΩ（本版恒为 1）。 */
+ * range_index 映射：0=150 Ω、1=1.5 kΩ、2=15 kΩ。 */
 void UartDebug_LogMeasurement(const FRF_Point_t *point,
                               const ADC_Window_t *window,
                               uint8_t range_index);

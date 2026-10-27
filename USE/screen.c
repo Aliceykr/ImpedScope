@@ -320,8 +320,8 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
     s_active_freq_hz = frequency_hz;
     /* 档位切换后,上一档的“最近错误”不再适用。 */
     s_last_error_code = 0u;
-    /* 强制下一轮 Screen_Poll 立即刷新结果区。t10 现在显示 H 相位,
-     * 由 500 ms 整帧统一更新,不再在这里单发。 */
+    /* 强制下一轮 Screen_Poll 立即刷新结果区。t10 由整帧统一更新,
+     * 切档时由 Screen_FlushRange() 额外立即补发。 */
     s_last_tick = HAL_GetTick() - SCREEN_REFRESH_PERIOD_MS;
     if (s_rx_armed == 0u)
     {
@@ -331,67 +331,49 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
     return 1u;
 }
 
-static void Screen_ClickReset(void)
-{
-    uint32_t primask = __get_PRIMASK();
-
-    __disable_irq();
-    s_click_count      = 0u;
-    s_click_first_tick = 0u;
-    s_click_last_tick  = 0u;
-    __set_PRIMASK(primask);
-}
-
-static void Screen_ClickKeepLast(void)
-{
-    uint32_t primask = __get_PRIMASK();
-
-    __disable_irq();
-    s_click_count      = 1u;
-    s_click_first_tick = s_click_last_tick;
-    __set_PRIMASK(primask);
-}
-
 Screen_KeyEvent_t Screen_PollKey(void)
 {
     Screen_KeyEvent_t event = SCREEN_KEY_NONE;
     uint32_t primask;
-    uint8_t  count;
-    uint32_t first_tick;
-    uint32_t last_tick;
+    uint32_t now;
 
+    /* 读快照与改队列必须在同一个临界区内完成：
+     * 若分成两段，两次临界区之间的按键会被误清（ISR 里 ++s_click_count）。 */
     primask = __get_PRIMASK();
     __disable_irq();
-    count      = s_click_count;
-    first_tick = s_click_first_tick;
-    last_tick  = s_click_last_tick;
-    __set_PRIMASK(primask);
 
-    if (count >= 2u)
+    now = HAL_GetTick();
+    if (s_click_count >= 2u)
     {
-        if ((uint32_t)(last_tick - first_tick) <= SCREEN_DOUBLE_CLICK_MS)
+        if ((uint32_t)(s_click_last_tick - s_click_first_tick) <= SCREEN_DOUBLE_CLICK_MS)
         {
             /* 两下都在窗口内：双击，队列清空。 */
-            Screen_ClickReset();
+            s_click_count      = 0u;
+            s_click_first_tick = 0u;
+            s_click_last_tick  = 0u;
             event = SCREEN_KEY_DOUBLE;
         }
         else
         {
             /* 两下隔太久：第一下算单击，第二下留作新的待定单击。 */
-            Screen_ClickKeepLast();
+            s_click_count      = 1u;
+            s_click_first_tick = s_click_last_tick;
             event = SCREEN_KEY_SINGLE;
         }
     }
-    else if (count == 1u)
+    else if (s_click_count == 1u)
     {
-        if ((uint32_t)(HAL_GetTick() - last_tick) > SCREEN_DOUBLE_CLICK_MS)
+        if ((uint32_t)(now - s_click_last_tick) > SCREEN_DOUBLE_CLICK_MS)
         {
             /* 窗口过期，没有第二下：单击。 */
-            Screen_ClickReset();
+            s_click_count      = 0u;
+            s_click_first_tick = 0u;
+            s_click_last_tick  = 0u;
             event = SCREEN_KEY_SINGLE;
         }
     }
 
+    __set_PRIMASK(primask);
     return event;
 }
 

@@ -75,7 +75,7 @@ void Screen_Fatal(uint8_t code);
 void Screen_FatalReportBlocking(void);
 
 /* 在主循环中反复调用;每 500 ms 分条刷新 t0~t9,每条之间留 2 ms 给 HMI 重绘。
- * t10 由 Screen_FlushRange() 在切档时立即补发,不参与整帧刷新。 */
+ * t10 仍随整帧刷新,切档时由 Screen_FlushRange() 额外立即补发一次。 */
 void Screen_Poll(void);
 
 /* 单击/双击判定窗口：按下后等这么久没有第二下，就按单击处理。
