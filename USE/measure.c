@@ -538,34 +538,23 @@ typedef struct
 #define CALIB_COUNT     (sizeof(s_calib) / sizeof(s_calib[0u]))
 
 /*
- * 标定表:单个测量频率点(1 kHz)。
+ * 标定表：1 kHz / 10 kHz 两个频点。
  *
- * 当前为恒等值,即不做任何修正。实测方法:
- * 用已知精密电阻(如 1 kohm / 0.1%)做直通标定,记录实测 H_cal,
- * 与理论值比较得到
- *   mag_ratio = |H_true| / |H_meas|
- *   phase_deg = angle(H_meas) - angle(H_true)
- * 标定时的采样参数(窗口周期数、Fs)必须与实测一致。
+ * 参考 DUT：纯电阻，实际 1010 Ω；Rf = 1500 Ω。
+ * 旧表下实测（稳定窗口）：
+ *   1 kHz : G≈996.35 µS, B≈0.48 µS, P≈0.027°, H≈3.49 dB
+ *   10 kHz: G≈966 µS,    B≈1 µS,    P≈0.070°, H≈3.22 dB
  *
- * 注意 Calib_Lookup() 是就近取值、不做插值:本表只有 1 kHz 一项,
- * 默认频点与表值重合;运行时改到其他频点时,仍就近取这一项的恒等修正。
- * 若将来要做多频点精确标定,必须同步扩展这张表。
+ * 反推恒等表原始值后，按 R_ref=1010 Ω 重算：
+ *   1 kHz : |Y_raw|≈981.6 µS, P_raw≈-1.186° → mag_ratio≈1.009
+ *   10 kHz: |Y_raw|≈960.2 µS, P_raw≈-11.559° → mag_ratio≈1.031
+ *
+ * mag_ratio = |H_true| / |H_meas|，phase_deg = angle(H_meas)-angle(H_true)
+ * 纯电阻的 H_true 相位为 180°，因此 phase_deg 就等于屏幕 P。
  */
 static const Calib_Point_t s_calib[] = {
-    /* 1 kHz 纯电阻标定:实际 DUT = 985 Ω, Rf = 1500 Ω。
-     * 屏幕实测 G=1.013 mS, B=-0.021 mS, H=3.64 dB。
-     * 理论 |H| = 1500/985 = 1.52284, 理论相位 = 0°。
-     *   mag_ratio = 1.52284 / 10^(3.64/20) ≈ 1.002
-     *   phase_deg = atan2(-0.021, 1.013) ≈ -1.19°
-     * 这一项只修正 1 kHz 下与 DUT 无关的固定通道相位/增益。 */
-    {  1000.0f, 1.002f, -1.19f },
-
-    /* 10 kHz 纯电阻标定:同一只 DUT = 985 Ω,Rf = 1500 Ω。
-     * 0° 修正时实测 P=-11.91°,说明 10 kHz 原始相位误差约 -12°;
-     * 之前 -24° 版本显示 +12°,正好是多扣了 12°。
-     *   mag_ratio = 1.52284 / (10^(3.38/20) / 1.002) ≈ 1.034
-     *   phase_deg ≈ -12.0° */
-    { 10000.0f, 1.034f, -12.00f },
+    {  1000.0f, 1.009f, -1.186f },
+    { 10000.0f, 1.031f, -11.559f },
 };
 
 static uint8_t Calib_Lookup(float frequency_hz, float *mag_ratio, float *phase_deg);

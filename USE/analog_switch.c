@@ -5,27 +5,29 @@
 /* 四档标称电阻（Ω）。E24 常用值，10 倍间距。 */
 static const float s_ohm_nominal[SW_COUNT] =
 {
-    150.0f, 1500.0f, 15000.0f, 150000.0f
+    15.0f, 150.0f, 1500.0f, 15000.0f
 };
 
 /* 默认 R_eff = 标称值 + Ron 估算。标定后用 Switch_SetCalibratedOhm() 覆盖。 */
 static float s_ohm_eff[SW_COUNT] =
 {
+    15.0f + SW_RON_NOMINAL,
     150.0f + SW_RON_NOMINAL,
     1500.0f + SW_RON_NOMINAL,
-    15000.0f + SW_RON_NOMINAL,
-    150000.0f + SW_RON_NOMINAL
+    15000.0f + SW_RON_NOMINAL
 };
 
 static uint8_t s_index    = 0u;
 static uint8_t s_up_count = 0u;
 
-/* A/B 编码：00 → X0(150Ω)，01 → X1(1.5kΩ)，10 → X2(15kΩ)，11 → X3(150kΩ)。 */
+/* A0/A1 编码（A0=E2，A1=E3）：
+ * 00 → Y0(15Ω)，01 → Y1(150Ω)，10 → Y2(1.5kΩ)，11 → Y3(15kΩ)。
+ * E#(INH) 硬件固定接 GND。 */
 static void Switch_WritePins(uint8_t index)
 {
-    HAL_GPIO_WritePin(SW_A_PORT, SW_A_PIN,
+    HAL_GPIO_WritePin(SW_A0_PORT, SW_A0_PIN,
                       ((index & 0x01u) != 0u) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(SW_B_PORT, SW_B_PIN,
+    HAL_GPIO_WritePin(SW_A1_PORT, SW_A1_PIN,
                       ((index & 0x02u) != 0u) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
@@ -36,14 +38,14 @@ void Switch_Init(void)
     /* 当前固定用 PE2/PE3。若改到别的端口，这里和 9_30.ioc 要一起改。 */
     __HAL_RCC_GPIOE_CLK_ENABLE();
 
-    init.Pin   = SW_A_PIN;
+    init.Pin   = SW_A0_PIN;
     init.Mode  = GPIO_MODE_OUTPUT_PP;
     init.Pull  = GPIO_NOPULL;
     init.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(SW_A_PORT, &init);
+    HAL_GPIO_Init(SW_A0_PORT, &init);
 
-    init.Pin = SW_B_PIN;
-    HAL_GPIO_Init(SW_B_PORT, &init);
+    init.Pin = SW_A1_PIN;
+    HAL_GPIO_Init(SW_A1_PORT, &init);
 
     s_index    = 0u;
     s_up_count = 0u;
@@ -97,7 +99,7 @@ void Switch_SetCalibratedOhm(uint8_t index, float ohm)
 }
 
 /* 选“预测不超 1.32 V 的最大档”。R_eff 随档位递增，所以最后一个满足的
- * 就是最大的合格档；从 150 Ω 起步时最多三跳就能到 150 kΩ。 */
+ * 就是最大的合格档；从 15 Ω 起步时最多三跳就能到 15 kΩ。 */
 uint8_t Switch_Recommend(float uo_peak_v)
 {
     uint8_t best = s_index;

@@ -71,7 +71,7 @@ void MX_UART4_Init(void)
 
 }
 
-/* USART3 init function（只输出调试日志，TX-only：PD8） */
+/* USART3 init function（只输出调试日志，TX-only：PB10） */
 void MX_USART3_UART_Init(void)
 {
   huart3.Instance = USART3;
@@ -151,15 +151,15 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     }
 
     __HAL_RCC_USART3_CLK_ENABLE();
-    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    /* PD8 ------> USART3_TX（TX-only，PD9 不使用） */
-    GPIO_InitStruct.Pin = GPIO_PIN_8;
+    /* PB10 ------> USART3_TX（TX-only，PB11 不使用） */
+    GPIO_InitStruct.Pin = GPIO_PIN_10;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART3_IRQn);

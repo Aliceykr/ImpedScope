@@ -37,13 +37,13 @@ MICU-OmniProbe 用一颗 STM32H750XBH6 测量未知一端口网络（DUT）的�
 R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 ```
 
-- 四档：**150 Ω / 1.5 kΩ / 15 kΩ / 150 kΩ**；默认 `R_eff` 为 250 Ω / 1.6 kΩ / 15.1 kΩ / 150.1 kΩ。
+- 四档：**15 Ω / 150 Ω / 1.5 kΩ / 15 kΩ**；默认 `R_eff` 为 115 Ω / 250 Ω / 1.6 kΩ / 15.1 kΩ。
 - 4052 由 **PE2 (A) / PE3 (B)** 选择；`INH` 接 GND；未用的 Y 半部全部接地。
 
 ### 2.2 数字部分
 
 - ADC1/ADC2 双 ADC 规则组同步采样，TIM6 TRGO 触发 300 kHz，CDR 打包 + DMA。
-- UART4（921600）驱动串口屏；USART3（PD8，921600，TX-only）输出调试日志。
+- UART4（921600）驱动串口屏；USART3（PB10，921600，TX-only）输出调试日志。
 - 调试口为 SWD（PA13/PA14），没有调试 UART 复用。
 - SPI1 仍初始化但当前无从设备，不参与测量。
 
@@ -78,7 +78,7 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 | ADC1 | PA0_C | `ADC1_INP0`，模拟 | `Ui` |
 | ADC2 | PA1_C | `ADC2_INP1`，模拟 | `Uo` |
 | UART4 | PC10 / PC11 | AF8，921600 8N1 | 串口屏 TX/RX |
-| USART3 | PD8 | AF7，921600 8N1，TX-only | 调试日志 |
+| USART3 | PB10 | AF7，921600 8N1，TX-only | 调试日志 |
 | 4052 A/B | PE2 / PE3 | GPIO 推挽输出 | 量程选择 |
 | TIM6 | 内部 | PSC=3，ARR=99 | 300 kHz TRGO |
 | SWD | PA13 / PA14 | Serial Wire | 调试/下载 |
@@ -86,7 +86,7 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 | LSE | PC14 / PC15 | 32.768 kHz | RTC 备选 |
 | SPI1 | PB5 / PG11 / PG9 | MOSI/SCK/MISO | 当前无设备 |
 
-- PD9 不使用（USART3 只配 TX）。
+- PB11 不使用（USART3 只配 TX）。
 - PA4 不分配。
 - 所有模拟输入为 0–3.3 V 单端，无负压。
 
@@ -96,7 +96,7 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 上电
   → HAL/时钟/GPIO/DMA/SPI1/UART4/USART3/ADC1/TIM6/ADC2
   → Screen_Init()            启动 UART4 接收（b0）
-  → Switch_Init()            4052 切到 150 Ω，等 10 ms
+  → Switch_Init()            4052 切到 15 Ω，等 10 ms
   → CircuitID_Init()
   → ADC_Sampler_Init()       校准 + 双 ADC 同步 + DMA + TIM6
   → UartDebug_Init()          调试口就绪，输出 banner
@@ -177,7 +177,7 @@ G = Re[Y]，B = Im[Y]
 
 ### 6.5 数值示例
 
-1 µF 电容，`R_eff = 250 Ω`（150 Ω 档），1 kHz，源 1 Vpp（`Ui` 峰值 0.5 V）：
+1 µF 电容，`R_eff = 115 Ω`（15 Ω 档），1 kHz，源 1 Vpp（`Ui` 峰值 0.5 V）：
 
 ```text
 Y   = jωC ≈ j 6.283 mS
@@ -205,18 +205,18 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 | 档 | R | R_eff（默认） | Ron 占比 | 覆盖（Uo 0.15–1.5 V） | 10 mS 时 Uo |
 |---|---|---|---|---|---|
-| 0 | 150 Ω | 250 Ω | 40% | 1.2–12 mS | 1.25 V |
-| 1 | 1.5 kΩ | 1.6 kΩ | 6.25% | 0.188–1.88 mS | 削顶 |
-| 2 | 15 kΩ | 15.1 kΩ | 0.66% | 19.9–198.7 µS | — |
-| 3 | 150 kΩ | 150.1 kΩ | 0.067% | 2.0–20.0 µS | — |
+| 0 | 15 Ω | 115 Ω | 87% | 2.6–26 mS | 0.575 V |
+| 1 | 150 Ω | 250 Ω | 40% | 1.2–12 mS | 1.25 V |
+| 2 | 1.5 kΩ | 1.6 kΩ | 6.25% | 0.188–1.88 mS | 削顶 |
+| 3 | 15 kΩ | 15.1 kΩ | 0.66% | 19.9–198.7 µS | — |
 
-- 源 1 Vpp（峰值 0.5 V）、10 mS 时电流 5 mA；150 Ω 档输出 1.25 V，留 17% 余量。
-- 0.1 mS 由 15 kΩ 档承担（0.755 V）；150 kΩ 档低于任务书下限，作备用。
-- 0.1–10 mS 全程覆盖；150 Ω 档 Ron 占 40%，是唯一需要重点标定的一档。
+- 源 1 Vpp（峰值 0.5 V）、10 mS 时电流 5 mA；15 Ω 档输出 0.575 V，150 Ω 档输出 1.25 V。
+- 0.1 mS 由 15 kΩ 档承担（约 100 µS）；0.1–10 mS 全程覆盖。
+- 15 Ω 档 Ron 占 87%，是必须优先标定的一档；150 Ω 档 Ron 占 40%，也要重点标定。
 
 ### 8.2 选档算法
 
-- 上电：`Switch_Init()` 切到 150 Ω；第一个有效窗口用 `Switch_Recommend()` 一跳选到“不削顶的最大档”：
+- 上电：`Switch_Init()` 切到 15 Ω；第一个有效窗口用 `Switch_Recommend()` 一跳选到“不削顶的最大档”：
   ```text
   predicted = Uo_meas × R_eff[i] / R_eff[current]
   选满足 predicted ≤ SW_UO_UP_V（1.32 V）的最大档
@@ -231,9 +231,9 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 ### 8.3 4052 接线
 
-- COM（X）接运放输出 `Uo`；X0/X1/X2/X3 分别接 150 Ω/1.5 kΩ/15 kΩ/150 kΩ，电阻另一端共接虚地。
-- A/B 编码：`00→X0`、`01→X1`、`10→X2`、`11→X3`。
-- `INH` 接 GND；Y 半部（Y/Y0..Y3）接地。
+- COM（X）接运放输出 `Uo`；OA1/OA2/OA3/OA4 分别接 15 Ω/150 Ω/1.5 kΩ/15 kΩ，电阻另一端共接虚地。
+- A0/A1 编码：`00→OA1(15Ω)`、`01→OA2(150Ω)`、`10→OA3(1.5kΩ)`、`11→OA4(15kΩ)`。
+- `INH` 接 GND；E2=A0、E3=A1。
 - PE2/PE3 在 `Switch_Init()` 里配置为推挽输出、初始低电平；`.ioc` 已同步。
 
 ## 9. 串口屏（UART4）
@@ -254,16 +254,16 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 | `t7` | `Ui` 交流有效值（V）与 kappa | `Ui:0.1234V k:0.98` |
 | `t8` | `Uo` 交流有效值（V）与 kappa | `Uo:0.0988V k:0.97` |
 | `t9` | H 的幅值（dB） | `H:-3.97dB` |
-| `t10` | H 的相位（°） | `A:-88.62` |
+| `t10` | 当前反馈电阻档位 | `R:1.5k` |
 
 - `t1`–`t4` 依赖 `CIR_DUT_TOPOLOGY=1`；设为 0（只算 H）时这四行固定显示 `-`。
 - 阶段顺序：`BOOT → CLK → PERIPH → MODULE → SCAN → LOOP`；`BOOT`/`CLK` 在 UART 就绪前，屏幕不可见；`PERIPH` 起可见，且保持约 150 ms。
 - b0（`freq_change`）发送 `0x01 0x01 0x01`（`printh 010101`）；`Screen_TakeRefreshKey()` 读即清除，主循环把 `range_ready` 清 0 后重新选频/选档。
-- 档位不上屏；`Screen_SetActiveFreq()` 只更新当前频率、清上一频率结果并强制下一帧刷新，不再单独发 `t10`。
+- 档位在 `t10` 显示为 `R:15 / R:150 / R:1.5k / R:15k`；`Screen_SetActiveFreq()` 只更新当前频率、清上一频率结果并强制下一帧刷新，不再单独发 `t10`。
 
 ## 10. 调试串口（USART3）
 
-- **USART3，PD8 TX（AF7），921600 8N1，TX-only**；PD9 不使用。
+- **USART3，PB10 TX（AF7），921600 8N1，TX-only**；PB11 不使用。
 - 中断优先级 **5**（UART4/ADC/DMA 为 0），不抢占采样窗口。
 - 发送：1024 字节环形缓冲 + `HAL_UART_Transmit_IT()`；主循环只拷贝，不阻塞；缓冲满整行丢弃并计数。
 - 速率：每次有效测量一行，最小间隔 `UART_DEBUG_MIN_INTERVAL_MS = 200 ms`（5 Hz）。
@@ -279,7 +279,7 @@ f=1000,Y_uS=1000,P_mdeg=-12300,G_uS=977,B_uS=-213,H_dB_x100=408,H_deg_x100=16770
 - `P_mdeg`：毫度（-12.3° → -12300）
 - `H_dB_x100 / H_deg_x100`：dB×100、度×100
 - `R_ohm`：当前 `R_eff`
-- `range`：0=150 Ω、1=1.5 kΩ、2=15 kΩ、3=150 kΩ
+- `range`：0=15 Ω、1=150 Ω、2=1.5 kΩ、3=15 kΩ
 - `Ui_rms_mV / Uo_rms_mV`：去直流后的交流有效值（mV）
 
 上电 banner：
@@ -288,7 +288,7 @@ f=1000,Y_uS=1000,P_mdeg=-12300,G_uS=977,B_uS=-213,H_dB_x100=408,H_deg_x100=16770
 BOOT 9_30 debug uart 921600
 ```
 
-接线：USB-TTL 的 **RX → PD8**，**GND → GND**。若 921600 误码，改 `.ioc` 的 `USART3.BaudRate` 和 `usart.c` 中的 921600 为 115200。USART3 出错时 `screen.c` 的 `HAL_UART_ErrorCallback()` 会清理标志并调用 `UartDebug_OnError()` 重启发送。
+接线：USB-TTL 的 **RX → PB10**，**GND → GND**。若 921600 误码，改 `.ioc` 的 `USART3.BaudRate` 和 `usart.c` 中的 921600 为 115200。USART3 出错时 `screen.c` 的 `HAL_UART_ErrorCallback()` 会清理标志并调用 `UartDebug_OnError()` 重启发送。
 
 ## 11. ADC 采样
 
@@ -372,10 +372,10 @@ BOOT 9_30 debug uart 921600
 1. 预热 30 min，接 0.1% 精密电阻 `R_cal` 作为 DUT；
 2. 选到该档，读 `H`，`R_eff = -H · R_cal`；
 3. `Switch_SetCalibratedOhm(index, R_eff)` 写入；
-4. 150 Ω 档建议用 8–10 mS 的 DUT（Uo≈1.25 V）标定，因为 Ron 随信号幅度变；
-5. 1.5 k/15 k/150 k 档用小信号即可；温度变化大时记录温漂。
+4. 15 Ω 档建议用 8–10 mS 的 DUT（Uo≈0.46–0.58 V）标定；150 Ω 档可用 10 mS（Uo≈1.25 V）；Ron 随信号幅度变。
+5. 150 Ω/1.5 kΩ/15 kΩ 档用小信号即可；温度变化大时记录温漂。
 
-只有一只 1 kΩ 标准件时：能直接标 150 Ω 和 1.5 kΩ 两档；15 k/150 k 可再用“标称 + 估出的 Ron”推算（Ron 占比很小）。
+只有一只 1 kΩ 标准件时：可标 150 Ω/1.5 kΩ/15 kΩ；15 Ω 档 Ron 占比太大，需另用低阻标准件或电流法单独标定。
 
 ### 13.2 两路直通 H_thru
 
@@ -432,14 +432,14 @@ phase_deg = angle(H_thru)
 
 ## 15. 已知限制
 
-- **150 Ω 档的 Ron 占 40%**：标定后温漂约 2%/10 °C，10% 指标有余量；若实测 Ron >150 Ω 或温度范围很宽，需换低 Ron 开关（ADG16xx）或降低源幅度。
-- **150 kΩ 档的 C_off 相位**：10 kHz 约 8°，但它不在 0.1–10 mS 内，只作备用；工作档最大 15 kΩ（相移 <1°）。
+- **15 Ω 档的 Ron 占 87%**：必须优先标定；若实测 Ron >150 Ω 或温度范围很宽，需换低 Ron 开关（ADG16xx）或降低源幅度。
+- **15 kΩ 档的 C_off 相位**：10 kHz 相移 <1°；15 kΩ 已覆盖 0.1 mS 低端。
 - **换档 10 ms**：换档瞬间窗口丢弃；1 kHz 时占 10%，100 Hz 时占 1%。
 - **自动选频耗时**：100 Hz 窗口 1 s，重新扫描五档可能需要数秒。
 - **外部源频率/直流不在固件控制内**：源频率偏离会导致 κ 下降/相位误差；源直流中点必须是 1.65 V，否则 DUT 上会有 1.65 V 直流，TIA 可能饱和。
 - **幅值门限是占位值**：`CIR_INPUT_MIN_AMP`/`CIR_OUTPUT_MIN_AMP = 4` 码，需按实际噪声调整。
 - **调试串口只发不收**：USART3 TX-only，没有下行命令。
-- **档位不上屏**：屏幕只显示频率/结果/状态；量程可从 USART3 日志的 `range`/`R_ohm` 看。
+- **档位在 t10 显示**：`R:15 / R:150 / R:1.5k / R:15k`；更细的 `R_eff` 可从 USART3 日志的 `range`/`R_ohm` 看。
 - **两路增益/相位需要逐档重标**：当前 `s_calib` 是 1.5 kΩ 下测的，换档后绝对值只可信到相对变化。
 
 ## 16. 编译与维护
@@ -456,7 +456,7 @@ bash .ccg-build/build.sh <outdir>
 CubeMX 重新生成后检查：
 
 1. Keil 工程仍包含 `measure.c`、`screen.c`、`analog_switch.c`、`uart_debug.c`，头文件路径含 `../USE`。
-2. `.ioc`：PE2/PE3 为 `GPIO_Output`（4052 A/B）；PD8 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
+2. `.ioc`：PE2/PE3 为 `GPIO_Output`（4052 A/B）；PB10 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
 3. `main.c` USER CODE 区仍调用 `Screen_Init()`、`Switch_Init()`、`CircuitID_Init()`、`ADC_Sampler_Init()`、`UartDebug_Init()`、`FreqScan_Select()`、`Screen_Poll()`、`UartDebug_LogMeasurement()`。
 4. `adc.c` 的 `ADC_DUALMODE_REGSIMULT`/`DualModeData`/`TwoSamplingDelay` 仍在 `USER CODE BEGIN ADC1_Init 2` 区；ADC1 的 DMA 为 Word 对齐。
 5. TIM6 的 PSC/ARR 与 `ADC_SAMPLER_RATE_HZ` 一致；SPI1 仍为主机但无设备。
@@ -469,7 +469,7 @@ CubeMX 重新生成后检查：
 已通过：
 
 - ArmClang 编译 + 链接：**39 files, 0 errors**；Program Size：Code 51330、RO-data 2334、RW-data 40、ZI-data 4968。
-- `.ioc` 与代码的引脚/实例一致性检查：PE2/PE3、PD8/USART3、PC10/11/UART4。
+- `.ioc` 与代码的引脚/实例一致性检查：PE2/PE3、PB10/USART3、PC10/11/UART4。
 
 待上板：
 

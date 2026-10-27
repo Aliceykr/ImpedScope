@@ -1,4 +1,5 @@
 #include "screen.h"
+#include "analog_switch.h"
 #include "uart_debug.h"
 
 #include <stdio.h>
@@ -80,6 +81,7 @@ static uint32_t s_active_freq_hz;          /* 当前真正在测量的频率 */
 
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
+static const char *Screen_RangeText(void);
 static void Screen_SendStatusBlocking(const char *value, uint32_t timeout);
 static void Screen_SendStatusRaw(const char *value);
 static void Screen_RxStart(void);
@@ -476,6 +478,22 @@ void Screen_Poll(void)
     }
 }
 
+static const char *Screen_RangeText(void)
+{
+#if (SW_ENABLE != 0u)
+    switch (Switch_Get())
+    {
+        case 0u: return "15";
+        case 1u: return "150";
+        case 2u: return "1.5k";
+        case 3u: return "15k";
+        default: return "?";
+    }
+#else
+    return "1.5k";
+#endif
+}
+
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value)
 {
     int written;
@@ -599,16 +617,9 @@ static uint16_t Screen_BuildCommands(void)
     }
     length = Screen_AppendCommand(length, "t9", value);
 
-    /* t10:原来这里是频率档位,自动检测后 f: 已经显示频率;
-     * 空出来显示被 t9 截断的 H 相位。 */
-    if (s_has_result != 0u)
-    {
-        (void)snprintf(value, sizeof(value), "A:%.2f", (double)s_result.h_phase_deg);
-    }
-    else
-    {
-        (void)snprintf(value, sizeof(value), "A:-");
-    }
+    /* t10:当前反馈电阻档位(标称值,便于和四档定义对应)。
+     * H 相位 A 不再显示。 */
+    (void)snprintf(value, sizeof(value), "R:%s", Screen_RangeText());
     length = Screen_AppendCommand(length, "t10", value);
 
     /* t6:心跳,每刷新周期 +1 */

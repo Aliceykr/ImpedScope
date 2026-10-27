@@ -4,18 +4,18 @@
 - 日期：2026-10-22
 - 适用工程：ImpedScope / 9_30（STM32H750XBH6）
 - 关联代码：[Core/Src/usart.c](Core/Src/usart.c)、[Core/Inc/usart.h](Core/Inc/usart.h)、[Core/Src/main.c](Core/Src/main.c)、[Core/Src/stm32h7xx_it.c](Core/Src/stm32h7xx_it.c)、[9_30.ioc](9_30.ioc)、[MDK-ARM/9_30.uvprojx](MDK-ARM/9_30.uvprojx)、新增 [USE/uart_debug.c](USE/uart_debug.c) / [USE/uart_debug.h](USE/uart_debug.h)
-- 一句话：新增 USART3（PD8 TX，921600 8N1，3.3 V TTL，TX-only）作为**只读调试日志口**，每完成一次有效测量输出一行测量值；UART4 继续专用于串口屏，两者互不干扰。
+- 一句话：新增 USART3（PB10 TX，921600 8N1，3.3 V TTL，TX-only）作为**只读调试日志口**，每完成一次有效测量输出一行测量值；UART4 继续专用于串口屏，两者互不干扰。
 
 ---
 
 ## 0. 结论摘要
 
-1. **实例与引脚**：USART3，PD8 = TX（AF7），3.3 V TTL；**TX-only**，PD9 不使用。
+1. **实例与引脚**：USART3，PB10 = TX（AF7），3.3 V TTL；**TX-only**，PB11 不使用。
 2. **只输出、不接收命令**：本次不做标定写入、不做 Flash 持久化、不做二进制流；日志内容包含 f、|Y|、φY、G、B、H、当前档位、Ui/Uo。
 3. **非阻塞**：发送走 1024 字节环形缓冲 + `HAL_UART_Transmit_IT()`，主循环只做内存拷贝，不 `HAL_Delay`、不阻塞测量窗口。
 4. **速率**：默认每完成一次有效测量输出一行，最小间隔 200 ms（5 Hz）；1 kHz 测量时最多 5 行/秒，100 Hz 时 1 行/秒。
 5. **代码隔离**：协议/缓冲全部放在 `USE/uart_debug.c/.h`；`usart.c/h` 只加 USART3 的 CubeMX 风格初始化；`main.c` 只加两处调用；`stm32h7xx_it.c` 加 `USART3_IRQHandler`。
-6. **`.ioc` 同步**：PD8、USART3、NVIC（优先级 5）、`Mcu.IP`/`PinsNb`、`functionlistsort` 全部补上；CubeMX 重新生成后初始化代码可复现。
+6. **`.ioc` 同步**：PB10、USART3、NVIC（优先级 5）、`Mcu.IP`/`PinsNb`、`functionlistsort` 全部补上；CubeMX 重新生成后初始化代码可复现。
 7. **预算**：一行约 100 字节，921600 下约 1.1 ms；5 Hz 占空比约 0.55%，对测量无可见影响。
 
 ---
@@ -46,7 +46,7 @@
 |---|---|---|
 | 用途 | **只输出调试日志** | 不做命令解析 |
 | 实例 | **USART3** | APB1，60 MHz |
-| 引脚 | **PD8 = TX（TX-only）** | AF7；PD9 不使用 |
+| 引脚 | **PB10 = TX（TX-only）** | AF7；PB11 不使用 |
 | 波特率 | **921600 8N1** | 3.3 V TTL，无流控 |
 | 日志内容 | **测量值** | f、|Y|、φY、G、B、H、档位、Ui/Uo |
 | 持久化 | **不需要** | 不改 Flash |
@@ -57,11 +57,11 @@
 
 ## 3. 硬件与电气
 
-- PD8 为 USART3_TX 的 AF7；3.3 V TTL，直接接 USB-TTL 的 RX/GND。
-- 接线：USB-TTL 的 **RX → PD8**，**GND → GND**；PD9 不使用（TX-only，将来要命令再加）。
+- PB10 为 USART3_TX 的 AF7；3.3 V TTL，直接接 USB-TTL 的 RX/GND。
+- 接线：USB-TTL 的 **RX → PB10**，**GND → GND**；PB11 不使用（TX-only，将来要命令再加）。
 - 921600 的时钟：APB1 = 60 MHz，`USARTDIV = 60e6 / (16 × 921600) = 4.069`，16 倍过采样 + 小数分频，误差 <0.2%；建议上线前用示波器/逻辑分析仪看一位宽度。
 - 若 USB-TTL 在 921600 下误码率高：把 `.ioc` 的 `USART3.BaudRate` 和代码里的 921600 一起改成 115200（只改两处），协议不变。
-- **PD8 必须在板上引出**（见 §10 待确认）；若没有，备选：PB10/PB11（USART3）、PA2/PA3（USART2），代码只改引脚/实例。
+- **PB10 必须在板上引出**（见 §10 待确认）；若没有，备选：PA2/PA3（USART2），代码只改引脚/实例。
 
 ---
 
@@ -70,14 +70,14 @@
 在现有 `9_30.ioc` 中追加/修改：
 
 ```text
-Mcu.Pin18=PD8
+Mcu.Pin18=PB10
 Mcu.PinsNb=19
 
 Mcu.IP12=USART3
 Mcu.IPNb=13
 
-PD8.Mode=Asynchronous
-PD8.Signal=USART3_TX
+PB10.Mode=Asynchronous
+PB10.Signal=USART3_TX
 
 USART3.BaudRate=921600
 USART3.IPParameters=BaudRate
@@ -95,8 +95,8 @@ NVIC.USART3_IRQn=true\:5\:0\:false\:false\:true\:true\:true\:true
 
 - `NVIC.USART3_IRQn` 的优先级取 **5**：低于 UART4/ADC/DMA 的 0，避免日志中断插到采样窗口前面。
 - `USART3` 的时钟源沿用 `RCC.USART234578Freq_Value = 60000000`（APB1），不需要改 RCC。
-- CubeMX 重新生成后应检查：`MX_USART3_UART_Init()` 出现在 `main.c`、`USART3_IRQHandler()` 出现在 `stm32h7xx_it.c`、PD8 为 AF7。
-- 本次不改 GPIO 标签（PD8 保持默认），避免和 CubeMX 的引脚命名冲突。
+- CubeMX 重新生成后应检查：`MX_USART3_UART_Init()` 出现在 `main.c`、`USART3_IRQHandler()` 出现在 `stm32h7xx_it.c`、PB10 为 AF7。
+- 本次不改 GPIO 标签（PB10 保持默认），避免和 CubeMX 的引脚命名冲突。
 
 ---
 
@@ -180,7 +180,7 @@ void UartDebug_OnError(void);
   - `H_deg_x100 = (int32_t)(h_phase_deg * 100.0f)`；
   - `Ui_rms_mV/Uo_rms_mV = (int32_t)(window->ui_rms * ADC_SAMPLER_LSB_TO_V * 1000.0f)`。
 - **速率限制**：`UartDebug_LogMeasurement()` 内部 `HAL_GetTick()` 比较，小于 200 ms 直接返回；不排队。
-- **无 RX**：不调用 `HAL_UART_Receive_IT`；PD9 不配置。
+- **无 RX**：不调用 `HAL_UART_Receive_IT`；PB11 不配置。
 - **错误处理**：不定义 `HAL_UART_ErrorCallback`（`screen.c` 已有定义，重复定义会链接冲突）；USART3 的错误在 `screen.c` 的回调里加一个分支清除并重启 TX（见 5.6）。
 
 ### 5.4 [Core/Src/main.c](Core/Src/main.c)
@@ -308,7 +308,7 @@ bash .ccg-build/build.sh <outdir>
 
 | 编号 | 测试 | 方法 | 通过标准 |
 |---|---|---|---|
-| T1 | 日志通路 | USB-TTL RX→PD8、GND；921600 8N1；上电 | 能看到 `BOOT` banner 和测量行 |
+| T1 | 日志通路 | USB-TTL RX→PB10、GND；921600 8N1；上电 | 能看到 `BOOT` banner 和测量行 |
 | T2 | 屏幕共存 | 观察 t0~t10、按 b0 | 屏幕刷新正常，b0 仍能触发重扫 |
 | T3 | 速率 | 1 kHz 与 100 Hz 各跑 30 s | 1 kHz 约 5 行/s，100 Hz 约 1 行/s；无丢行 |
 | T4 | 缓冲满 | 暂时把波特率降到 9600 或连续触发 | 丢行计数增加，主循环不卡死，无 E12 |
@@ -322,18 +322,18 @@ bash .ccg-build/build.sh <outdir>
 
 | 风险/待确认 | 影响 | 处理 |
 |---|---|---|
-| **PD8 是否在板上引出** | 没引出就接不了 USB-TTL | 先核对焊盘；没有则换 PB10/PB11 或 PA2/PA3，代码只改实例/引脚 |
+| **PB10 是否在板上引出** | 没引出就接不了 USB-TTL | 先核对焊盘；没有则换 PA2/PA3（USART2），代码只改实例/引脚 |
 | 921600 下 USB-TTL 误码 | 日志乱码 | 降 115200；`.ioc` 和代码各改一处 |
 | 日志速率/格式是否合适 | 终端刷屏或信息不足 | 默认 5 Hz、CSV；可改 `UART_DEBUG_MIN_INTERVAL_MS` 和格式 |
-| RX 是否留 | 已确认只 TX | PD9 不配置；将来要命令再加 |
+| RX 是否留 | 已确认只 TX | PB11 不配置；将来要命令再加 |
 | CubeMX 重新生成覆盖 | `usart.c` 手工段被覆盖 | `.ioc` 已同步，重新生成会复现；`uart_debug.c` 在 USE 不受影响 |
 | `HAL_UART_ErrorCallback` 重复定义 | 链接冲突 | 只在 `screen.c` 里加 USART3 分支，模块不再定义 |
 | `%f` 不可用 | 日志编译/输出异常 | 全部用整数缩放单位，禁用 `%f` |
 | 日志函数重入 | 缓冲错乱 | 单生产者（主循环）+ 单消费者（ISR），16 位索引原子；不在中断里调用 `UartDebug_LogMeasurement` |
 
-**已确认**：只 TX、PD9 不配置；日志速率/格式按默认。**还需要你核对**：
+**已确认**：只 TX、PB11 不配置；日志速率/格式按默认。**还需要你核对**：
 
-1. PD8 是否真的引出？如果只有 PB10/PB11 或 PA2/PA3，告诉我。
+1. PB10 是否真的引出？如果只有 PA2/PA3，告诉我。
 2. 921600 的 USB-TTL 是否确定支持？不确定就降 115200，跑通再提速。
 
 ---
@@ -342,7 +342,7 @@ bash .ccg-build/build.sh <outdir>
 
 | 阶段 | 内容 | 产出 | 预估 |
 |---|---|---|---|
-| M1 | 改 `.ioc`：PD8、USART3、NVIC、IP/Pins、functionlist | `.ioc` 可被 CubeMX 识别 | 0.5 h |
+| M1 | 改 `.ioc`：PB10、USART3、NVIC、IP/Pins、functionlist | `.ioc` 可被 CubeMX 识别 | 0.5 h |
 | M2 | `usart.c/h`：`MX_USART3_UART_Init` + MSP/DeInit | USART3 能收发 | 0.5 h |
 | M3 | 新增 `USE/uart_debug.c/.h`：环形缓冲、格式化、日志行 | 编译通过 | 1–2 h |
 | M4 | `main.c`、`stm32h7xx_it.c`、`screen.c` 接入 | 上电能出日志 | 0.5 h |
@@ -354,7 +354,7 @@ bash .ccg-build/build.sh <outdir>
 
 | 文件 | 改动 | 状态 |
 |---|---|---|
-| [9_30.ioc](9_30.ioc) | PD8、USART3、NVIC、IP/Pins、functionlist | 已改 |
+| [9_30.ioc](9_30.ioc) | PB10、USART3、NVIC、IP/Pins、functionlist | 已改 |
 | [Core/Inc/usart.h](Core/Inc/usart.h) | `huart3`、`MX_USART3_UART_Init` 声明 | 已改 |
 | [Core/Src/usart.c](Core/Src/usart.c) | USART3 初始化 + MSP/DeInit | 已改 |
 | [Core/Src/main.c](Core/Src/main.c) | `MX_USART3_UART_Init`、`UartDebug_Init`、日志调用 | 已改 |
