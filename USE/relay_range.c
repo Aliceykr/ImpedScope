@@ -46,3 +46,32 @@ float Relay_GetOhm(void)
 {
     return s_ohm[s_index];
 }
+
+uint8_t Relay_Set(uint8_t index)
+{
+    if (index >= RELAY_COUNT)
+    {
+        return 0u;
+    }
+    if (index == s_index)
+    {
+        return 1u;              /* 已在目标档，不重复动作 */
+    }
+
+    /* 先断开当前档，等触点释放，再闭合目标档：任何时刻最多一路闭合。 */
+    Relay_Write(s_index, GPIO_PIN_RESET);
+    HAL_Delay(RELAY_RELEASE_MS);
+
+    s_index = index;
+    Relay_Write(s_index, GPIO_PIN_SET);
+    HAL_Delay(RELAY_SETTLE_MS);
+
+    return 1u;
+}
+
+uint8_t Relay_Next(void)
+{
+    (void)Relay_Set((uint8_t)((s_index + 1u) % RELAY_COUNT));
+
+    return s_index;
+}

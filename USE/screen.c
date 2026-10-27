@@ -69,7 +69,11 @@ static volatile uint8_t s_rx_armed;
 static uint32_t s_rx_lockout_tick;
 static uint8_t s_ascii_key_match;
 static const char s_ascii_key[] = "010101";
-static volatile uint8_t s_freq_key_pending;
+/* 按键点击队列：最多缓存 2 次点击的时间戳，由中断写入、主循环消费。
+ * 主循环可能被 DFT 窗口阻塞 1 s，所以时间戳必须取自中断，不能取轮询时刻。 */
+static volatile uint8_t  s_click_count;        /* 0..2 */
+static volatile uint32_t s_click_first_tick;   /* 第一次按下的时刻 */
+static volatile uint32_t s_click_last_tick;    /* 最近一次按下的时刻 */
 
 /* 自动扫描的五个候选频率,仅用于校验/记录当前测量频率。 */
 #define SCREEN_FREQ_COUNT 5u
@@ -99,7 +103,9 @@ void Screen_Init(void)
     s_fatal_code = SCREEN_E01_HAL_INIT;   /* 默认覆盖 MX_*_Init 内的 Error_Handler */
     s_rx_lockout_tick = 0u;
     s_ascii_key_match = 0u;
-    s_freq_key_pending = 0u;
+    s_click_count = 0u;
+    s_click_first_tick = 0u;
+    s_click_last_tick = 0u;
     s_active_freq_hz = 0u;                /* 0 = 尚未生效 */
     s_rx_armed = 0u;
     for (index = 0u; index <= SCREEN_ERROR_CODE_MAX; ++index)
@@ -325,17 +331,68 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
     return 1u;
 }
 
-uint8_t Screen_TakeRefreshKey(void)
+static void Screen_ClickReset(void)
 {
     uint32_t primask = __get_PRIMASK();
-    uint8_t pending;
 
     __disable_irq();
-    pending = s_freq_key_pending;
-    s_freq_key_pending = 0u;
+    s_click_count      = 0u;
+    s_click_first_tick = 0u;
+    s_click_last_tick  = 0u;
+    __set_PRIMASK(primask);
+}
+
+static void Screen_ClickKeepLast(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_click_count      = 1u;
+    s_click_first_tick = s_click_last_tick;
+    __set_PRIMASK(primask);
+}
+
+Screen_KeyEvent_t Screen_PollKey(void)
+{
+    Screen_KeyEvent_t event = SCREEN_KEY_NONE;
+    uint32_t primask;
+    uint8_t  count;
+    uint32_t first_tick;
+    uint32_t last_tick;
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    count      = s_click_count;
+    first_tick = s_click_first_tick;
+    last_tick  = s_click_last_tick;
     __set_PRIMASK(primask);
 
-    return (pending != 0u) ? 1u : 0u;
+    if (count >= 2u)
+    {
+        if ((uint32_t)(last_tick - first_tick) <= SCREEN_DOUBLE_CLICK_MS)
+        {
+            /* 两下都在窗口内：双击，队列清空。 */
+            Screen_ClickReset();
+            event = SCREEN_KEY_DOUBLE;
+        }
+        else
+        {
+            /* 两下隔太久：第一下算单击，第二下留作新的待定单击。 */
+            Screen_ClickKeepLast();
+            event = SCREEN_KEY_SINGLE;
+        }
+    }
+    else if (count == 1u)
+    {
+        if ((uint32_t)(HAL_GetTick() - last_tick) > SCREEN_DOUBLE_CLICK_MS)
+        {
+            /* 窗口过期，没有第二下：单击。 */
+            Screen_ClickReset();
+            event = SCREEN_KEY_SINGLE;
+        }
+    }
+
+    return event;
 }
 
 /* b0(freq_change) 只认严格匹配的按键值:
@@ -378,8 +435,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             now = HAL_GetTick();
             if ((int32_t)(now - s_rx_lockout_tick) >= 0)
             {
-                s_freq_key_pending = 1u;
-                s_rx_lockout_tick = now + 100u;
+                if (s_click_count == 0u)
+                {
+                    s_click_first_tick = now;
+                }
+                if (s_click_count < 2u)
+                {
+                    ++s_click_count;
+                }
+                s_click_last_tick = now;
+                s_rx_lockout_tick = now + 100u;     /* 100 ms 锁定期保持原样 */
             }
         }
 
@@ -475,6 +540,28 @@ void Screen_Poll(void)
                 HAL_Delay(SCREEN_CMD_GAP_MS);
             }
         }
+    }
+}
+
+void Screen_FlushRange(void)
+{
+    uint16_t length = 0u;
+    char value[SCREEN_VALUE_CHARS];
+
+    (void)snprintf(value, sizeof(value), "R:%s", Screen_RangeText());
+    length = Screen_AppendCommand(length, "t10", value);
+    if (length == 0u)
+    {
+        return;
+    }
+
+    if (HAL_UART_Transmit(&huart4, s_tx_buffer, length, 10u) != HAL_OK)
+    {
+        Screen_ReportError(SCREEN_E10_UART_TX);
+    }
+    if (s_rx_armed == 0u)
+    {
+        Screen_RxStart();
     }
 }
 

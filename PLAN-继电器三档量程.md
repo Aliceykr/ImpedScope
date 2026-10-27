@@ -4,7 +4,7 @@
 - 日期：2026-10-27
 - 工程：9_30（STM32H750XBH6）
 - 关联：`USE/measure.c/.h`、`USE/screen.c/.h`、`USE/uart_debug.c/.h`、`Core/Src/main.c`、`Core/Src/usart.c`、`9_30.ioc`、`MDK-ARM/9_30.uvprojx`、`README.md`
-- 一句话：**删除 74HC4052 模拟开关方案，改用 3 路独立继电器（高电平闭合）；三档 150 Ω / 1.5 kΩ / 15 kΩ；本版不做自动选档、不做运行期切档，只在上电时闭合 1.5 kΩ 档，固件固定按 1500 Ω 计算。**
+- 一句话：**删除 74HC4052 模拟开关方案，改用 3 路独立继电器（高电平闭合）；三档 150 Ω / 1.5 kΩ / 15 kΩ；本版不做自动选档，只在上电时闭合 1.5 kΩ 档，固件固定按 1500 Ω 计算；运行期手动切档由 `PLAN-双击切档.md`（b0 双击）实现。**
 
 ---
 
@@ -37,7 +37,7 @@
 ### 1.2 非目标（本版明确不做）
 
 - **不做自动量程**：不调用 `Switch_Recommend()` / `Switch_Update()`，不根据 Uo 换档。
-- **不做运行期切档**：不提供 `Relay_Set()`、不提供 `RELAY_DEFAULT_RANGE` 运行期宏、不加 USART 命令、不加屏幕按钮。
+- **不做自动选档**（不按 `Uo` 幅值/削波自动换档）；运行期手动切档由 `PLAN-双击切档.md`（b0 双击）实现，不在本计划范围内。
 - 不改测量算法、DFT、ADC 时序、串口屏协议。
 - 不改 `s_calib` 的 1 kHz/10 kHz 标定值（它们是在 Rf=1500 下测的，正好匹配默认档）。
 - 不做三档的逐档标定流程（后续要切档时再做）。
@@ -189,7 +189,7 @@ PE4.Signal=GPIO_Output
 #include "main.h"
 
 /* 三路独立继电器，高电平闭合，低电平断开。
- * 本版不做运行期切档：上电只闭合 K2（1.5 kΩ）。
+ * 本版上电只闭合默认档 K2（1.5 kΩ）；运行期手动切档见 PLAN-双击切档.md。
  */
 
 #define RELAY_COUNT          3u
@@ -212,7 +212,7 @@ float Relay_GetOhm(void);
 #endif
 ```
 
-**不要**在头文件里加 `Relay_Set()`、`Relay_Select()`、`Relay_Auto()` 等接口；本版明确不切档。
+**运行期切档接口** `Relay_Set()` / `Relay_Next()` 已由 `PLAN-双击切档.md` 加入；本计划不包含自动量程接口（`Relay_Auto()` 等）。
 
 #### 4.2.2 实现
 
@@ -266,7 +266,7 @@ float Relay_GetOhm(void)
 - 上电时序：三路全低 → 10 ms → K2 高 → 10 ms；不会出现两路同时闭合。
 - 本版没有 `Relay_Set()`，所以 `s_index` 只会在 `Relay_Init()` 里被设为 1，之后不变。
 - `Relay_GetOhm()` 返回 **1500.0f**，与 `CIR_FEEDBACK_RESISTOR_OHM` 和 `s_calib` 的 Rf=1500 对齐；继电器接触电阻（<1 Ω）忽略。
-- 如果后续要做切档，再增加 `Relay_Set()` 并保持“先全断、再闭合目标”的时序；本版不提前加。
+- 运行期切档（`Relay_Set()` / `Relay_Next()`，保持“先全断、再闭合目标”时序）已由 `PLAN-双击切档.md` 实现；本计划不再重复。
 
 ### 4.3 `Core/Src/main.c`
 
@@ -400,7 +400,7 @@ RESULT: BUILD OK (0 error)
 | 触点抖动/接触电阻 | 测量不稳定 | 10 ms 建立；接触电阻 <1 Ω，本版忽略；后续切档时按档标定 `R_eff` |
 | 删除 `analog_switch` 遗留引用 | 编译失败 | 全仓 grep + 编译检查 |
 | `.ioc` PE2/PE3 旧标签 `SW_A0/SW_A1` | CubeMX 生成名称不符 | 改标签为 `RELAY_K1/K2`，PE4 新增 `RELAY_K3` |
-| 本版不切档 | 只能测 1.5 kΩ 档 | 用户已确认；后续要切档再扩展，不在本计划范围 |
+| 本版不自动切档 | 默认 1.5 kΩ，b0 双击手动切档 | 自动量程由后续计划实现；手动切档见 PLAN-双击切档.md |
 
 ---
 
@@ -409,7 +409,7 @@ RESULT: BUILD OK (0 error)
 1. **硬件核对**：PE2/PE3/PE4 是否引出；继电器模块高有效；三路触点与电阻对应；加 10 kΩ 下拉。
 2. **改 `.ioc`**：PE2/PE3 标签改为 `RELAY_K1/K2`；新增 PE4 `RELAY_K3`；`PinsNb=20`；三脚 GPIO_Output 初始低。
 3. **删除旧模块**：`git rm USE/analog_switch.c USE/analog_switch.h`；从 `uvprojx` 删除 `analog_switch.c`。
-4. **新增 `USE/relay_range.c/.h`**：按 §4.2 实现 `Relay_Init/Get/GetOhm`；**不加切档接口**。
+4. **新增 `USE/relay_range.c/.h`**：按 §4.2 实现 `Relay_Init/Get/GetOhm`；切档接口见 `PLAN-双击切档.md`。
 5. **改 `main.c`**：替换 include/初始化；删除 `Switch_*` 和量程分支、`range_ready`、`Window_UoPeakV`；日志传 `Relay_Get()`。
 6. **改 `measure.h` 注释**：`analog_switch` → `relay_range`；不改编译逻辑。
 7. **改 `uvprojx`**：加入 `relay_range.c`；保持 39 个源文件。
@@ -437,8 +437,8 @@ RESULT: BUILD OK (0 error)
 
 ## 11. 明确不做（防止实施 agent 加戏）
 
-- 不实现 `Relay_Set()` / `Relay_Select()` / `Relay_Auto()`。
-- 不改 `main.c` 的量程自动判断（整段删除，不是关闭宏）。
-- 不加 USART3 下行命令、不加屏幕切档按钮、不加 `RELAY_DEFAULT_RANGE` 运行期变量。
+- 不实现自动量程：不根据 `Uo` 幅值/削波自动换档（`Switch_Recommend()` 那套不复活）。
+- 运行期手动切档（`Relay_Set()` / `Relay_Next()`，b0 双击触发）由 `PLAN-双击切档.md` 实现，不在本计划范围。
+- 不加 USART3 下行命令、不加 `RELAY_DEFAULT_RANGE` 运行期变量。
 - 不在本版做三档 `R_eff` 标定；`s_calib` 保持 1k/10k 的 Rf=1500 标定值。
 - 不改 ADC/DFT/屏幕协议/USART3 波特率。

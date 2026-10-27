@@ -44,6 +44,15 @@ uint8_t Relay_Get(void);
 /* 当前档的反馈电阻（Ω）。本版恒为 1500.0f。 */
 float Relay_GetOhm(void);
 
+/* 切到指定档（0=150 Ω、1=1.5 kΩ、2=15 kΩ）。先断开当前档、等释放，
+ * 再闭合目标档、等建立。返回 1=成功，0=参数越界（此时继电器状态不变）。
+ * 重复切到当前档会直接返回 1，不做任何动作。 */
+uint8_t Relay_Set(uint8_t index);
+
+/* 切到下一档（1.5k → 15k → 150 → 1.5k 循环），返回切换后的档位。
+ * 内部调用 Relay_Set()，会阻塞约 RELAY_RELEASE_MS + RELAY_SETTLE_MS。 */
+uint8_t Relay_Next(void);
+
 #ifdef __cplusplus
 }
 #endif

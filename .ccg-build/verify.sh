@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=39
-EXPECT_CODE=50538
+EXPECT_CODE=51314
 CODE_TOL=400
 fail=0
 
@@ -77,6 +77,10 @@ has Core/Inc/main.h "RELAY_K3_Pin"                             "K3 引脚宏（m
 has Core/Src/gpio.c "RELAY_K1_Pin|RELAY_K2_Pin|RELAY_K3_Pin"   "三个继电器脚被统一配置"
 has Core/Src/main.c "Relay_Init();"                            "上电调用 Relay_Init()"
 has Core/Src/main.c "CircuitID_SetFeedbackResistor(Relay_GetOhm());" "同步固定 R_eff=1500"
+# b0 双击切档
+has Core/Src/main.c "SCREEN_KEY_DOUBLE"                            "b0 双击切档分支"
+has Core/Src/main.c "Screen_PollKey();"                            "Screen_PollKey 每轮调用"
+has USE/relay_range.c "uint8_t Relay_Next(void)"                   "Relay_Next 已实现"
 # 时钟/串口
 has Core/Src/tim.c "Prescaler = 3"                             "TIM6 PSC=3（300 kHz）"
 has Core/Src/tim.c "Period = 99"                               "TIM6 ARR=99"

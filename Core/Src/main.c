@@ -259,10 +259,26 @@ int main(void)
     FRF_Point_t frf_point;
     uint32_t deadline;
     uint8_t  got = 0u;
+    Screen_KeyEvent_t key;
 
-    /* HMI 的 b0(freq_change) 现在作为“强制刷新”：
-     * 按下后立刻重新扫描五档并重测，不再用硬件复位。 */
-    if ((Screen_TakeRefreshKey() != 0u) || (scan_fail_count >= 3u))
+    /* HMI 的 b0(freq_change)：单击 = 强制重扫；双击 = 切换继电器档位。
+     * 必须在每轮循环开头调用一次，单击靠"窗口超时"产生。 */
+    key = Screen_PollKey();
+
+    if (key == SCREEN_KEY_DOUBLE)
+    {
+      uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
+
+      CircuitID_SetFeedbackResistor(Relay_GetOhm());
+      Screen_ClearResult();              /* 旧档算出的读数作废 */
+      Screen_ClearError();               /* 上一档的 E20 之类残留作废 */
+      Screen_FlushRange();               /* t10 立即显示新档位 */
+      (void)ADC_Sampler_Restart();       /* 丢掉混了两档的窗口 */
+      UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
+      continue;
+    }
+
+    if ((key == SCREEN_KEY_SINGLE) || (scan_fail_count >= 3u))
     {
       Screen_SetStage("SCAN");
       if (FreqScan_Select() != 0u)
