@@ -30,3 +30,5 @@ JLinkLog.txt
 # .ccg-build 脚本的编译输出目录
 .ccg-build/verify-out/
 .ccg-build/build-*/
+# 根目录编译输出目录（build.sh 指定 outdir=build-revN 时）
+build-rev*/
