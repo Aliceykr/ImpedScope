@@ -1,18 +1,18 @@
-# MICU-OmniProbe：STM32 黑盒电路频响辨识
+# STM32 黑盒电路频响辨识
 
-> 项目代号：**MICU-OmniProbe** · 适用硬件：STM32H750XBH6，3.3 V 单电源 · 文档版本：v2.0（2026-10-22），按当前固件实现编写
+> 适用硬件：STM32H750XBH6，3.3 V 单电源 · 文档版本：v3.0（2026-10-27），按当前固件实现编写
 
 ## 1. 概述
 
-MICU-OmniProbe 用一颗 STM32H750XBH6 测量未知一端口网络（DUT）的导纳：
+本工程用一颗 STM32H750XBH6 测量未知一端口网络（DUT）的导纳：
 
 - 外部信号源输出 **1 Vpp、1.65 V 直流偏置** 的正弦，接到 `Ui` 节点；
 - DUT 接在 `Ui` 与运放虚地（1.65 V）之间，跨阻放大器把 DUT 电流转换成 `Uo`；
 - 两路 ADC 同步采样 `Ui`、`Uo`，在选定频率上做单频 DFT，得到 `H = Uo/Ui`；
 - 由 `Y = -H/R_eff`、`Z = -R_eff/H` 计算导纳、阻抗、G、B、φY；
-- 固件自动在 **5 档频率** 和 **4 档反馈电阻** 中选择，结果送串口屏，同时通过 USART3 输出调试日志。
+- 固件自动在 **5 档频率** 中选择；反馈电阻为 **3 路继电器**，本版上电固定闭合 1.5 kΩ 档、不做自动量程。结果送串口屏，同时通过 USART3 输出调试日志。
 
-测量范围按任务书设计：`Re[Y]`、`Im[Y]`、`|Y|` 为 **0.1–10 mS**，误差 ≤10%；`φY` 为 **±90°**，误差 ≤5%。
+测量范围（任务书指标）：`Re[Y]`、`Im[Y]`、`|Y|` 为 **0.1–10 mS**，误差 ≤10%；`φY` 为 **±90°**，误差 ≤5%。**本版继电器固定 1.5 kΩ 档，实际只覆盖 0.188–1.88 mS（见 §8、§15）；0.1–10 mS 全量程需后续扩展 K1/K3 切档。**
 
 ## 2. 系统架构
 
@@ -21,24 +21,18 @@ MICU-OmniProbe 用一颗 STM32H750XBH6 测量未知一端口网络（DUT）的�
 ```text
 外部源 ── Ui ── DUT ──┬── 虚地 1.65 V（运放反相端）
  1 Vpp                │
- 1.65 V 偏置          └── R（四档之一）
+ 1.65 V 偏置          └── R（K1/K2/K3 之一，本版固定 K2 = 1.5 kΩ）
                              │
-                        4052（COM 接 Uo，输出侧）
+                        继电器触点（三路并联，高电平闭合）
                              │
                         运放输出 Uo（直流 1.65 V）
 ```
 
 - 运放为 3.3 V 单电源、轨到轨；反相端由同相端偏置在 **1.65 V**，所以虚地和 `Uo` 的直流工作点都是 1.65 V。
 - `Uo` 的交流摆幅设计为 0.15–1.5 V（围绕 1.65 V），即 0.15–3.15 V，落在 ADC 的 0–3.3 V 内。
-- 4052 公共端接 `Uo`，四个掷端各接一只反馈电阻，电阻另一端共接虚地。切换时的电荷注入被低阻输出吸收，不会直接打进虚地。
-- 等效反馈电阻：
-
-```text
-R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
-```
-
-- 四档：**15 Ω / 150 Ω / 1.5 kΩ / 15 kΩ**；默认 `R_eff` 为 115 Ω / 250 Ω / 1.6 kΩ / 15.1 kΩ。
-- 4052 由 **PE2 (A) / PE3 (B)** 选择；`INH` 接 GND；未用的 Y 半部全部接地。
+- 三路独立继电器（高电平闭合）各串一只反馈电阻，并联在 `Uo` 与虚地之间：**K1=150 Ω / K2=1.5 kΩ / K3=15 kΩ**。
+- 本版上电只闭合 **K2**，`R_eff` 恒为 1500 Ω；继电器接触电阻（<1 Ω）相对最小档 150 Ω 可忽略，按标称值使用。
+- GPIO（**PE2/PE3/PE4**）只驱动继电器模块的逻辑输入，模块自带三极管/MOS 驱动与续流。
 
 ### 2.2 数字部分
 
@@ -54,10 +48,10 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 ├─ USE/
 │  ├─ measure.h/.c        测量核心：频率、ADC 采样与单频 DFT、H/Z/Y、标定
 │  ├─ screen.h/.c         串口屏 UART4 协议、错误码、b0 按键
-│  ├─ analog_switch.h/.c  4052 四档反馈电阻、自动选档、R_eff 标定
+│  ├─ relay_range.h/.c    三路继电器反馈电阻（本版固定 1.5 kΩ）
 │  └─ uart_debug.h/.c     USART3 调试日志（TX-only、环形缓冲）
 ├─ Core/
-│  ├─ Src/main.c          初始化、自动选频/选档、主循环
+│  ├─ Src/main.c          初始化、自动选频、主循环
 │  ├─ Src/usart.c         UART4（屏幕）+ USART3（调试）
 │  ├─ Src/adc.c           ADC1/ADC2 双 ADC 同步配置
 │  ├─ Src/tim.c           TIM6，TRGO 触发 ADC
@@ -69,7 +63,7 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 └─ 9_30.ioc               CubeMX 配置
 ```
 
-`USE/` 是用户逻辑；CubeMX 重新生成时保留该目录。`analog_switch` 和 `uart_debug` 已加入 Keil 的 `Application/User/USE` 组。
+`USE/` 是用户逻辑；CubeMX 重新生成时保留该目录。`relay_range` 和 `uart_debug` 已加入 Keil 的 `Application/User/USE` 组。
 
 ## 4. 引脚与资源
 
@@ -79,7 +73,7 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 | ADC2 | PA1_C | `ADC2_INP1`，模拟 | `Uo` |
 | UART4 | PC10 / PC11 | AF8，921600 8N1 | 串口屏 TX/RX |
 | USART3 | PB10 | AF7，921600 8N1，TX-only | 调试日志 |
-| 4052 A/B | PE2 / PE3 | GPIO 推挽输出 | 量程选择 |
+| 继电器 K1/K2/K3 | PE2 / PE3 / PE4 | GPIO 推挽输出 | 量程选择（本版只闭合 K2） |
 | TIM6 | 内部 | PSC=3，ARR=99 | 300 kHz TRGO |
 | SWD | PA13 / PA14 | Serial Wire | 调试/下载 |
 | HSE | PH0 / PH1 | 外部晶振 | 系统时钟 |
@@ -96,26 +90,23 @@ R_eff = R + Ron        Ron ≈ 100 Ω（3.3 V，4052）
 上电
   → HAL/时钟/GPIO/DMA/SPI1/UART4/USART3/ADC1/TIM6/ADC2
   → Screen_Init()            启动 UART4 接收（b0）
-  → Switch_Init()            4052 切到 15 Ω，等 10 ms
+  → Relay_Init()            上电闭合 K2（1.5 kΩ），等吸合
   → CircuitID_Init()
   → ADC_Sampler_Init()       校准 + 双 ADC 同步 + DMA + TIM6
   → UartDebug_Init()          调试口就绪，输出 banner
   → FreqScan_Select()        五档频率打分
   → 主循环
-       b0 按下 → range_ready=0，重新选频/选档
+       b0 按下 → 重新选频
        f = Measure_GetFrequency()
        Freq_SourceSet(f)               空实现，源在外部
        ADC_Sampler_SetFrequency(f)     同频不重开；换频开新窗口
        ADC_Sampler_GetWindow()         等窗口，超时 1500 ms
-       range_ready==0 → Switch_Recommend() 一跳选档
-       Switch_Update()                 运行时换档
        CircuitID_Compute()             算 H/Z/Y/G/B
        Screen_SetResult() + UartDebug_LogMeasurement()
        Screen_Poll()                   每 500 ms 刷新屏幕
 ```
 
-- 频率选择只看 `Ui`（与反馈电阻无关），量程选择只看 `Uo`。
-- 换档后 `CircuitID_SetFeedbackResistor()` 同步 `R_eff`，`ADC_Sampler_Restart()` 重开窗口，当前结果丢弃。
+- 反馈电阻固定 1.5 kΩ：上电 `Relay_Init()` 后 `CircuitID_SetFeedbackResistor()` 同步一次，之后不变。
 - 计算失败/超时会清结果，屏幕显示 `-`，不显示陈旧读数。
 
 ## 6. 测量原理
@@ -172,7 +163,7 @@ G = Re[Y]，B = Im[Y]
 
 - `H` 的 dB/相位由 `20·log10(|H|)` 和 `atan2(H_im, H_re)` 得到。
 - `|H| < CIR_H_MIN_MAG`（1e-6）→ E08；Z/Y 非有限 → E09。
-- `R_eff` 由 `analog_switch` 提供，含 Ron 与标定修正，见第 8、13 节。
+- `R_eff` 由 `relay_range` 提供，本版恒为 1500 Ω，见第 8、13 节。
 - 两路 ADC 的增益/相位差由 `s_calib[]` 修正，见第 13 节。
 
 ### 6.5 数值示例
@@ -197,50 +188,35 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 - 取最高分；某档 `ui_coh > 0.95` 时提前结束；
 - 全部不合格时回到 1 kHz 并返回 0，主循环报 E04。
 
-选频只依赖 `Ui`，与反馈电阻无关，所以先选频、再按 `Uo` 选量程。`Measure_SetFrequency()` 可覆盖频率，范围 100–100000 Hz；外部源必须同步到当前频率。100 Hz 档窗口 1 s，扫描五档可能需要数秒。
+选频只依赖 `Ui`，与反馈电阻无关；本版量程固定 1.5 kΩ，无需选档。`Measure_SetFrequency()` 可覆盖频率，范围 100–100000 Hz；外部源必须同步到当前频率。100 Hz 档窗口 1 s，扫描五档可能需要数秒。
 
-## 8. 自动量程
+## 8. 继电器量程（本版固定 1.5 kΩ）
 
-### 8.1 四档反馈电阻
+### 8.1 三路继电器与档位
 
-| 档 | R | R_eff（默认） | Ron 占比 | 覆盖（Uo 0.15–1.5 V） | 10 mS 时 Uo |
-|---|---|---|---|---|---|
-| 0 | 15 Ω | 115 Ω | 87% | 2.6–26 mS | 0.575 V |
-| 1 | 150 Ω | 250 Ω | 40% | 1.2–12 mS | 1.25 V |
-| 2 | 1.5 kΩ | 1.6 kΩ | 6.25% | 0.188–1.88 mS | 削顶 |
-| 3 | 15 kΩ | 15.1 kΩ | 0.66% | 19.9–198.7 µS | — |
+| 通道 | GPIO | 电阻 | 本版状态 | 覆盖 \|Y\|（Uo 0.15–1.5 V，参考） |
+|---|---|---|---|---|
+| K1 | PE2 | 150 Ω | 断开（低） | 1.2–12 mS |
+| K2 | PE3 | 1.5 kΩ | **闭合（高，默认档）** | 0.188–1.88 mS |
+| K3 | PE4 | 15 kΩ | 断开（低） | 19.9–198.7 µS |
 
-- 源 1 Vpp（峰值 0.5 V）、10 mS 时电流 5 mA；15 Ω 档输出 0.575 V，150 Ω 档输出 1.25 V。
-- 0.1 mS 由 15 kΩ 档承担（约 100 µS）；0.1–10 mS 全程覆盖。
-- 15 Ω 档 Ron 占 87%，是必须优先标定的一档；150 Ω 档 Ron 占 40%，也要重点标定。
+- 高电平 = 继电器线圈得电 = 触点闭合；低电平/GND = 断开。三路**独立**，任意时刻最多闭合一路。
+- 每路：`Uo → 继电器触点 → 反馈电阻 → 虚地（1.65 V）`，三路并联；触点只承受小信号（≤1.5 V、≤5 mA）。
+- 继电器接触电阻通常 0.05–0.5 Ω，相对最小档 150 Ω 可忽略，`R_eff` 直接按标称值。
+- GPIO 只驱动继电器模块的逻辑输入（模块自带三极管/MOS 驱动与续流），不要直接驱动裸线圈。
 
-### 8.2 选档算法
+### 8.2 上电时序与固定档
 
-- 上电：`Switch_Init()` 切到 15 Ω；第一个有效窗口用 `Switch_Recommend()` 一跳选到“不削顶的最大档”：
-  ```text
-  predicted = Uo_meas × R_eff[i] / R_eff[current]
-  选满足 predicted ≤ SW_UO_UP_V（1.32 V）的最大档
-  ```
-- 运行时 `Switch_Update()`：
-  - `Uo` 削波 >1%（`SW_CLIP_PERMILLE`）或 `Uo > SW_UO_DOWN_V`（1.43 V）→ 立即降档；
-  - 预测下一档 ≤1.32 V → 连续 2 个窗口确认后升档；
-  - 其余保持。
-- 换档后：`CircuitID_SetFeedbackResistor()`、`Screen_ClearResult()`、`ADC_Sampler_Restart()`，丢弃当前结果。
-- 换档等待 `SW_SETTLE_MS = 10 ms`（4052 建立 + 运放退出饱和）。
-- `SW_ENABLE = 0` 时退回固定 `CIR_FEEDBACK_RESISTOR_OHM`（1500 Ω），用于无 4052 的回归测试。
-
-### 8.3 4052 接线
-
-- COM（X）接运放输出 `Uo`；OA1/OA2/OA3/OA4 分别接 15 Ω/150 Ω/1.5 kΩ/15 kΩ，电阻另一端共接虚地。
-- A0/A1 编码：`00→OA1(15Ω)`、`01→OA2(150Ω)`、`10→OA3(1.5kΩ)`、`11→OA4(15kΩ)`。
-- `INH` 接 GND；E2=A0、E3=A1。
-- PE2/PE3 在 `Switch_Init()` 里配置为推挽输出、初始低电平；`.ioc` 已同步。
+- `MX_GPIO_Init()`（CubeMX 生成）配 PE2/PE3/PE4 为推挽输出并写低；`Relay_Init()` 只做上电时序：三路全低（断开）→ 等 10 ms 释放 → 只把 PE3 拉高（K2 = 1.5 kΩ）→ 等 10 ms 吸合。
+- `CircuitID_SetFeedbackResistor(Relay_GetOhm())` 同步固定 `R_eff = 1500 Ω`，与 `s_calib`（Rf=1500）和 `CIR_FEEDBACK_RESISTOR_OHM` 对齐。
+- **本版不做自动量程、不做运行期切档**：无 `Relay_Set()`、无 USART3 下行命令、无屏幕切档按钮；K1/K3 硬件接好但固件不驱动闭合。
+- 上电三路全断到 K2 闭合之间 TIA 开环、`Uo` 可能撞轨；`Relay_Init()` 在 `ADC_Sampler_Init()` 之前完成，不会采到无效窗口。
 
 ## 9. 串口屏（UART4）
 
 - UART4，**921600 8N1**，PC10 TX / PC11 RX，DMA/中断均不使用，阻塞发送。
 - 每 500 ms 发一整帧 `t0`–`t10`，每条 `控件名.txt="值"` + `FF FF FF`；条间留 2 ms 给 HMI 重绘。
-- 屏幕只显示，频率/量程由固件自动选择；b0 作为“重新扫描”键。
+- 屏幕只显示，频率由固件自动选择（量程固定 1.5 kΩ）；b0 作为“重新扫描”键。
 
 | 控件 | 内容 | 示例 |
 |---|---|---|
@@ -258,8 +234,8 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 - `t1`–`t4` 依赖 `CIR_DUT_TOPOLOGY=1`；设为 0（只算 H）时这四行固定显示 `-`。
 - 阶段顺序：`BOOT → CLK → PERIPH → MODULE → SCAN → LOOP`；`BOOT`/`CLK` 在 UART 就绪前，屏幕不可见；`PERIPH` 起可见，且保持约 150 ms。
-- b0（`freq_change`）发送 `0x01 0x01 0x01`（`printh 010101`）；`Screen_TakeRefreshKey()` 读即清除，主循环把 `range_ready` 清 0 后重新选频/选档。
-- 档位在 `t10` 显示为 `R:15 / R:150 / R:1.5k / R:15k`；`Screen_SetActiveFreq()` 只更新当前频率、清上一频率结果并强制下一帧刷新，不再单独发 `t10`。
+- b0（`freq_change`）发送 `0x01 0x01 0x01`（`printh 010101`）；`Screen_TakeRefreshKey()` 读即清除，主循环重新选频。
+- 档位在 `t10` 显示为 `R:150 / R:1.5k / R:15k`（本版恒为 `R:1.5k`）；`Screen_SetActiveFreq()` 只更新当前频率、清上一频率结果并强制下一帧刷新，不再单独发 `t10`。
 
 ## 10. 调试串口（USART3）
 
@@ -272,14 +248,14 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 日志格式（CSV，整数单位，不用 `%f`）：
 
 ```text
-f=1000,Y_uS=1000,P_mdeg=-12300,G_uS=977,B_uS=-213,H_dB_x100=408,H_deg_x100=16770,R_ohm=1600,range=1,Ui_rms_mV=354,Uo_rms_mV=566
+f=1000,Y_uS=1000,P_mdeg=-12300,G_uS=977,B_uS=-213,H_dB_x100=408,H_deg_x100=16770,R_ohm=1500,range=1,Ui_rms_mV=354,Uo_rms_mV=566
 ```
 
 - `Y_uS/G_uS/B_uS`：µS（1 mS = 1000 µS）
 - `P_mdeg`：毫度（-12.3° → -12300）
 - `H_dB_x100 / H_deg_x100`：dB×100、度×100
 - `R_ohm`：当前 `R_eff`
-- `range`：0=15 Ω、1=150 Ω、2=1.5 kΩ、3=15 kΩ
+- `range`：0=150 Ω、1=1.5 kΩ、2=15 kΩ（本版恒为 1）
 - `Ui_rms_mV / Uo_rms_mV`：去直流后的交流有效值（mV）
 
 上电 banner：
@@ -345,18 +321,15 @@ BOOT 9_30 debug uart 921600
 | `ADC_SAMPLER_WINDOW_MIN/MAX` | `measure.h` | 256 / 400000 | 窗口点数上下限 |
 | `ADC_SAMPLER_VREF_V` | `measure.h` | 3.3 | VREF+/VDDA，只影响 t7/t8 电压 |
 | `CIR_DUT_TOPOLOGY` | `measure.h` | 1 | 1=算 Z/Y；0=只算 H |
-| `CIR_FEEDBACK_RESISTOR_OHM` | `measure.h` | 1500.0 | `SW_ENABLE=0` 时的固定 R |
+| `CIR_FEEDBACK_RESISTOR_OHM` | `measure.h` | 1500.0 | 固定反馈电阻（relay_range 同步后使用） |
 | `CIR_INPUT_MIN_AMP` / `CIR_OUTPUT_MIN_AMP` | `measure.h` | 4.0 | 幅值下限（码值，占位） |
 | `CIR_MIN_COHERENCE` | `measure.h` | 0.2 | 相干性下限 |
 | `CIR_H_MIN_MAG` | `measure.h` | 1e-6 | `|H|` 下限 |
 | `CIR_CLIP_LOW/HIGH_CODES` | `measure.h` | 64 / 65471 | 贴边码值 |
 | `CIR_CLIP_MAX_PERMILLE` | `measure.h` | 10 | 贴边比例上限（1%） |
-| `SW_ENABLE` | `analog_switch.h` | 1 | 1=四档自动量程；0=固定 R |
-| `SW_COUNT` | `analog_switch.h` | 4 | 档位数 |
-| `SW_RON_NOMINAL` | `analog_switch.h` | 100.0 | Ron 估算值（Ω） |
-| `SW_UO_UP_V` / `SW_UO_DOWN_V` | `analog_switch.h` | 1.32 / 1.43 | 升档预测上限/降档门限（V） |
-| `SW_CLIP_PERMILLE` | `analog_switch.h` | 10 | 换档削波判据（1%） |
-| `SW_SETTLE_MS` | `analog_switch.h` | 10 | 换档等待（ms） |
+| `RELAY_COUNT` | `relay_range.h` | 3 | 继电器档位数 |
+| `RELAY_DEFAULT_INDEX` | `relay_range.h` | 1 | 默认档（K2 = 1.5 kΩ） |
+| `RELAY_SETTLE_MS` / `RELAY_RELEASE_MS` | `relay_range.h` | 10 / 10 | 吸合建立 / 释放等待（ms） |
 | `UART_DEBUG_ENABLE` | `uart_debug.h` | 1 | 调试日志开关 |
 | `UART_DEBUG_MIN_INTERVAL_MS` | `uart_debug.h` | 200 | 日志最小间隔（ms） |
 | `UART_DEBUG_TX_BUFFER_SIZE` | `uart_debug.h` | 1024 | 发送环形缓冲（字节） |
@@ -365,17 +338,10 @@ BOOT 9_30 debug uart 921600
 
 ## 13. 标定
 
-### 13.1 每档 R_eff
+### 13.1 反馈电阻
 
-四档 `R_eff` 不同，逐档标定：
-
-1. 预热 30 min，接 0.1% 精密电阻 `R_cal` 作为 DUT；
-2. 选到该档，读 `H`，`R_eff = -H · R_cal`；
-3. `Switch_SetCalibratedOhm(index, R_eff)` 写入；
-4. 15 Ω 档建议用 8–10 mS 的 DUT（Uo≈0.46–0.58 V）标定；150 Ω 档可用 10 mS（Uo≈1.25 V）；Ron 随信号幅度变。
-5. 150 Ω/1.5 kΩ/15 kΩ 档用小信号即可；温度变化大时记录温漂。
-
-只有一只 1 kΩ 标准件时：可标 150 Ω/1.5 kΩ/15 kΩ；15 Ω 档 Ron 占比太大，需另用低阻标准件或电流法单独标定。
+本版固定闭合 K2（1.5 kΩ），`R_eff` 恒为 1500 Ω，不需要逐档标定；
+继电器接触电阻（<1 Ω）可忽略。若后续扩展切档，再对 K1/K3 按档标定 `R_eff`。
 
 ### 13.2 两路直通 H_thru
 
@@ -387,19 +353,19 @@ mag_ratio = 1 / |H_thru|
 phase_deg = angle(H_thru)
 ```
 
-- 必须**逐档 × 逐频点**做：4052 的 C_off 随档位、频率变化；
-- 标定时窗口长度、采样率、频率、档位必须与实际测量一致。
+- 本版只有 1.5 kΩ 一档，按**逐频点**做即可；将来加档时 C_off 随档位变化，需逐档重做。
+- 标定时窗口长度、采样率、频率必须与实际测量一致。
 
 ### 13.3 当前标定表
 
-`s_calib[]` 目前只有两项，且是在 **1.5 kΩ 反馈**下测的：
+`s_calib[]` 目前有两项，在 **1.5 kΩ 反馈**（即本版默认档）下测得，直接适用：
 
 | 频率 | mag_ratio | phase_deg |
 |---|---|---|
-| 1 kHz | 1.002 | -1.19° |
-| 10 kHz | 1.034 | -12.00° |
+| 1 kHz | 1.009 | -1.186° |
+| 10 kHz | 1.031 | -11.559° |
 
-换成四档后，这两项不能直接套到所有档位：尤其 10 kHz 的 -12° 与 C_off 强相关。必须按档重标；`Calib_Lookup()` 是**就近取值、不插值**，只标 1k/10k 时 100/300/3k 会取最近点。
+`Calib_Lookup()` 是**就近取值、不插值**，只标 1k/10k 时 100/300/3k 会取最近点。
 
 ## 14. 错误码
 
@@ -432,21 +398,21 @@ phase_deg = angle(H_thru)
 
 ## 15. 已知限制
 
-- **15 Ω 档的 Ron 占 87%**：必须优先标定；若实测 Ron >150 Ω 或温度范围很宽，需换低 Ron 开关（ADG16xx）或降低源幅度。
-- **15 kΩ 档的 C_off 相位**：10 kHz 相移 <1°；15 kΩ 已覆盖 0.1 mS 低端。
-- **换档 10 ms**：换档瞬间窗口丢弃；1 kHz 时占 10%，100 Hz 时占 1%。
+- **本版只测 1.5 kΩ 档**：覆盖约 0.188–1.88 mS；0.1–10 mS 全量程需后续扩展 K1/K3 切档。
+- **继电器模块依赖外部硬件**：必须高电平闭合、GPIO 只接模块逻辑输入；若模块低有效或上电吸合，需改硬件或在 `Relay_Write()` 反转（见 PLAN-继电器三档量程 §2.3）。
+- **上电三路全断 → TIA 开环**：`Relay_Init()` 必须在 `ADC_Sampler_Init()` 之前完成；复位/上电期间模块输入建议加 10 kΩ 下拉。
 - **自动选频耗时**：100 Hz 窗口 1 s，重新扫描五档可能需要数秒。
 - **外部源频率/直流不在固件控制内**：源频率偏离会导致 κ 下降/相位误差；源直流中点必须是 1.65 V，否则 DUT 上会有 1.65 V 直流，TIA 可能饱和。
 - **幅值门限是占位值**：`CIR_INPUT_MIN_AMP`/`CIR_OUTPUT_MIN_AMP = 4` 码，需按实际噪声调整。
 - **调试串口只发不收**：USART3 TX-only，没有下行命令。
-- **档位在 t10 显示**：`R:15 / R:150 / R:1.5k / R:15k`；更细的 `R_eff` 可从 USART3 日志的 `range`/`R_ohm` 看。
-- **两路增益/相位需要逐档重标**：当前 `s_calib` 是 1.5 kΩ 下测的，换档后绝对值只可信到相对变化。
+- **档位在 t10 显示**：`R:150 / R:1.5k / R:15k`（本版恒为 `R:1.5k`）；更细的 `R_eff` 可从 USART3 日志的 `range`/`R_ohm` 看。
+- **两路增益/相位只标了 1.5 kΩ 档**：本版固定该档，`s_calib` 直接适用；将来加档必须逐档重标。
 
 ## 16. 编译与维护
 
 - Keil MDK-ARM 打开 `MDK-ARM/9_30.uvprojx`；ArmClang V6.24（`.uvprojx` 的 `pArmCC` 已钉到该版本）。
 - CubeMX 6.18，HAL FW 1.13；系统时钟 480 MHz，HCLK 120 MHz，APB 60 MHz；ADC 37.5 MHz；SPI1 75 MHz。
-- 当前 **39 个源文件**，新增 `analog_switch.c`、`uart_debug.c`。
+- 当前 **39 个源文件**，含 `relay_range.c`、`uart_debug.c`。
 - 命令行构建：
 
 ```bash
@@ -455,29 +421,27 @@ bash .ccg-build/build.sh <outdir>
 
 CubeMX 重新生成后检查：
 
-1. Keil 工程仍包含 `measure.c`、`screen.c`、`analog_switch.c`、`uart_debug.c`，头文件路径含 `../USE`。
-2. `.ioc`：PE2/PE3 为 `GPIO_Output`（4052 A/B）；PB10 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
-3. `main.c` USER CODE 区仍调用 `Screen_Init()`、`Switch_Init()`、`CircuitID_Init()`、`ADC_Sampler_Init()`、`UartDebug_Init()`、`FreqScan_Select()`、`Screen_Poll()`、`UartDebug_LogMeasurement()`。
+1. Keil 工程仍包含 `measure.c`、`screen.c`、`relay_range.c`、`uart_debug.c`，头文件路径含 `../USE`。
+2. `.ioc`：PE2/PE3/PE4 为 `GPIO_Output`（标签 `RELAY_K1/K2/K3`）；PB10 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
+3. `main.c` USER CODE 区仍调用 `Screen_Init()`、`Relay_Init()`、`CircuitID_Init()`、`ADC_Sampler_Init()`、`UartDebug_Init()`、`FreqScan_Select()`、`Screen_Poll()`、`UartDebug_LogMeasurement()`。
 4. `adc.c` 的 `ADC_DUALMODE_REGSIMULT`/`DualModeData`/`TwoSamplingDelay` 仍在 `USER CODE BEGIN ADC1_Init 2` 区；ADC1 的 DMA 为 Word 对齐。
 5. TIM6 的 PSC/ARR 与 `ADC_SAMPLER_RATE_HZ` 一致；SPI1 仍为主机但无设备。
-6. `analog_switch.c`、`uart_debug.c` 在 `Application/User/USE` 组。
-
-`SW_ENABLE=0` 可退回固定 1.5 kΩ，便于无 4052 的板子做回归。
+6. `relay_range.c`、`uart_debug.c` 在 `Application/User/USE` 组。
 
 ## 17. 验证状态
 
 已通过：
 
-- ArmClang 编译 + 链接：**39 files, 0 errors**；Program Size：Code 51330、RO-data 2334、RW-data 40、ZI-data 4968。
-- `.ioc` 与代码的引脚/实例一致性检查：PE2/PE3、PB10/USART3、PC10/11/UART4。
+- ArmClang 编译 + 链接：**39 files, 0 errors**；Program Size：Code 50538、RO-data 2350、RW-data 24、ZI-data 4968。
+- `.ioc` 与代码的引脚/实例一致性检查：PE2/PE3/PE4（`RELAY_K1/K2/K3`）、PB10/USART3、PC10/11/UART4。
+- 固件源码（`USE/`、`Core/`）静态检查：无 `analog_switch` / `Switch_*` / `SW_ENABLE` 残留（README 与历史 PLAN 文档中的引用除外）。
 
 待上板：
 
 - USART3 921600 日志（T1）、与串口屏共存（T2）、速率/丢行（T3/T4）、中断影响（T5）、误码（T6）、回归（T7）。
-- 四档 `R_eff` 与 `H_thru` 逐档标定。
+- 继电器上电默认（T1）：PE2/PE3/PE4 = 0 V / 3.3 V / 0 V（K1 断、K2 合、K3 断）；K2 触点通断约 1.5 kΩ（T2）。
+- 固定 `R_eff = 1500 Ω`（T3）、1 kΩ 已知 DUT 的 |Y| ≈ 1 mS（T4）、30 s 观察无切档（T5）、断电/上电 10 次重复性（T6）。
 
 ## 18. 相关文档
 
-- [MICU-OmniProbe.md](MICU-OmniProbe.md)：项目名称/代号
-- [PLAN-反馈电阻自动切换.md](PLAN-反馈电阻自动切换.md)：四档电阻与自动量程的设计、标定与测试计划
-- [PLAN-第二路串口.md](PLAN-第二路串口.md)：USART3 调试口的实施计划
+- [PLAN-继电器三档量程.md](PLAN-继电器三档量程.md)：三路继电器量程与固定 1.5 kΩ 的实施方案（**当前实现依据**）

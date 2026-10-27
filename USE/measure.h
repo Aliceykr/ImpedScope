@@ -223,9 +223,9 @@ uint8_t ADC_Sampler_Restart(void);
 #define CIR_DUT_TOPOLOGY            1u
 #endif
 
-/* 旧固定反馈电阻（1.5 kΩ）。启用 analog_switch 模块后，应用层会在运行时
- * 调用 CircuitID_SetFeedbackResistor() 覆盖它；本宏只在 SW_ENABLE=0 时作为
- * 默认值使用。R 只参与 Y=-H/R 换算，不改变前端增益。 */
+/* 固定反馈电阻（1.5 kΩ）。relay_range 模块上电只闭合默认档 K2，R_eff 恒为
+ * 1500 Ω；应用层在 Relay_Init() 后调用 CircuitID_SetFeedbackResistor() 同步。
+ * R 只参与 Y=-H/R 换算，不改变前端增益。 */
 #define CIR_FEEDBACK_RESISTOR_OHM   1500.0f
 
 /* 单频幅值下限，单位：ADC 码值（2 * |S| / N）。低于此值只剩量化噪声，结果没有
@@ -267,7 +267,7 @@ typedef struct
 /* 初始化频响辨识模块。当前无状态需要初始化。 */
 void CircuitID_Init(void);
 
-/* 运行时反馈电阻（Ω，含 Ron 与标定修正）。切换量程后由应用层调用；
+/* 运行时反馈电阻（Ω）。Relay_Init() 后由应用层调用一次，固定为 1500 Ω；
  * <=0 时 CircuitID_Compute() 报 E02（CIR_CFG）。 */
 void  CircuitID_SetFeedbackResistor(float ohm);
 float CircuitID_GetFeedbackResistor(void);

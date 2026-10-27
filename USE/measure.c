@@ -649,8 +649,8 @@ static uint8_t Calib_Apply(float frequency_hz, double *h_re, double *h_im)
 static uint8_t CircuitID_IsFinite(double value);
 static double CircuitID_Coherence(double magnitude, double rms);
 
-/* 运行时反馈电阻（Ω）。默认取 CIR_FEEDBACK_RESISTOR_OHM，启用 analog_switch
- * 后由应用层在每次换档后调用 CircuitID_SetFeedbackResistor() 覆盖。 */
+/* 运行时反馈电阻（Ω）。默认取 CIR_FEEDBACK_RESISTOR_OHM，relay_range 模块
+ * 上电后由应用层调用 CircuitID_SetFeedbackResistor() 同步固定 R_eff。 */
 static float s_r_feedback = CIR_FEEDBACK_RESISTOR_OHM;
 
 void CircuitID_Init(void)

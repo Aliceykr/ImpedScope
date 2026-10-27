@@ -1,5 +1,5 @@
 #include "screen.h"
-#include "analog_switch.h"
+#include "relay_range.h"
 #include "uart_debug.h"
 
 #include <stdio.h>
@@ -480,18 +480,13 @@ void Screen_Poll(void)
 
 static const char *Screen_RangeText(void)
 {
-#if (SW_ENABLE != 0u)
-    switch (Switch_Get())
+    switch (Relay_Get())
     {
-        case 0u: return "15";
-        case 1u: return "150";
-        case 2u: return "1.5k";
-        case 3u: return "15k";
+        case 0u: return "150";
+        case 1u: return "1.5k";
+        case 2u: return "15k";
         default: return "?";
     }
-#else
-    return "1.5k";
-#endif
 }
 
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value)
@@ -617,7 +612,7 @@ static uint16_t Screen_BuildCommands(void)
     }
     length = Screen_AppendCommand(length, "t9", value);
 
-    /* t10:当前反馈电阻档位(标称值,便于和四档定义对应)。
+    /* t10:当前反馈电阻档位(标称值,便于和三档定义对应)。
      * H 相位 A 不再显示。 */
     (void)snprintf(value, sizeof(value), "R:%s", Screen_RangeText());
     length = Screen_AppendCommand(length, "t10", value);

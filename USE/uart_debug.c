@@ -1,6 +1,6 @@
 #include "uart_debug.h"
 #include "usart.h"
-#include "analog_switch.h"
+#include "relay_range.h"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -180,7 +180,7 @@ void UartDebug_LogMeasurement(const FRF_Point_t *point,
 
     h_db  = (long)UartDebug_Round(point->h_magnitude_dB * 100.0f);
     h_deg = (long)UartDebug_Round(point->h_phase_deg * 100.0f);
-    r_ohm = (long)UartDebug_Round(Switch_GetOhm());
+    r_ohm = (long)UartDebug_Round(Relay_GetOhm());
     ui_mv = (long)UartDebug_Round((float)(window->ui_rms * ADC_SAMPLER_LSB_TO_V * 1000.0));
     uo_mv = (long)UartDebug_Round((float)(window->uo_rms * ADC_SAMPLER_LSB_TO_V * 1000.0));
 

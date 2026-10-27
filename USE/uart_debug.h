@@ -9,7 +9,7 @@ extern "C" {
 #include "measure.h"
 
 /*
- * 第二路串口：USART3（PD8 = TX，TX-only），921600 8N1。
+ * 第二路串口：USART3（PB10 = TX，TX-only），921600 8N1。
  *
  * 只做调试日志输出，不接收命令：
  *   - 每完成一次有效测量输出一行（默认最小间隔 200 ms，5 Hz）；
@@ -38,7 +38,8 @@ void UartDebug_Write(const uint8_t *data, uint16_t length);
 /* 格式化输出（只支持 %s/%d/%ld/%lu/%u 等整数格式，不支持 %f）。 */
 void UartDebug_Printf(const char *format, ...);
 
-/* 输出一行测量值：f、|Y|、phiY、G、B、H、R、档位、Ui/Uo。 */
+/* 输出一行测量值：f、|Y|、phiY、G、B、H、R、档位、Ui/Uo。
+ * range_index 映射：0=150 Ω、1=1.5 kΩ、2=15 kΩ（本版恒为 1）。 */
 void UartDebug_LogMeasurement(const FRF_Point_t *point,
                               const ADC_Window_t *window,
                               uint8_t range_index);

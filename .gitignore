@@ -26,3 +26,7 @@ MDK-ARM/*.uvguix.*
 
 # Debugger logs
 JLinkLog.txt
+
+# .ccg-build 脚本的编译输出目录
+.ccg-build/verify-out/
+.ccg-build/build-*/

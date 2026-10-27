@@ -609,9 +609,9 @@
               <FilePath>../USE/screen.c</FilePath>
             </File>
             <File>
-              <FileName>analog_switch.c</FileName>
+              <FileName>relay_range.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../USE/analog_switch.c</FilePath>
+              <FilePath>../USE/relay_range.c</FilePath>
             </File>
             <File>
               <FileName>uart_debug.c</FileName>
