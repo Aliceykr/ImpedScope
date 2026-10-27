@@ -73,7 +73,7 @@
 | ADC2 | PA1_C | `ADC2_INP1`，模拟 | `Uo` |
 | UART4 | PC10 / PC11 | AF8，921600 8N1 | 串口屏 TX/RX |
 | USART3 | PB10 | AF7，921600 8N1，TX-only | 调试日志 |
-| 继电器 K1/K2/K3 | PE2 / PE3 / PE4 | GPIO 推挽输出 | 量程选择（本版只闭合 K2） |
+| 继电器 K1/K2/K3 | PE2 / PE3 / PE4 | GPIO 推挽输出 | 量程选择（上电默认 K2，b0 双击切档） |
 | TIM6 | 内部 | PSC=3，ARR=99 | 300 kHz TRGO |
 | SWD | PA13 / PA14 | Serial Wire | 调试/下载 |
 | HSE | PH0 / PH1 | 外部晶振 | 系统时钟 |
@@ -355,7 +355,7 @@ mag_ratio = 1 / |H_thru|
 phase_deg = angle(H_thru)
 ```
 
-- 本版只有 1.5 kΩ 一档，按**逐频点**做即可；将来加档时 C_off 随档位变化，需逐档重做。
+- 1.5 kΩ 档按**逐频点**做即可；切到 150 Ω / 15 kΩ 档后 C_off 随档位变化，这两档的 H_thru 需逐档重做。
 - 标定时窗口长度、采样率、频率必须与实际测量一致。
 
 ### 13.3 当前标定表
