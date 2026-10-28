@@ -913,6 +913,7 @@ static uint8_t CircuitID_IsFinite(double value)
 static uint8_t s_scan_request;
 static uint8_t s_range_request;
 static uint8_t s_scan_fail_count;
+static uint8_t s_scan_aborted;   /* 扫描被 B1 中止标志 */
 
 /* 请求函数（由 screen.c 调用） */
 void Measure_RequestScan(void)
@@ -935,7 +936,9 @@ static uint32_t FreqScan_Select(void)
   uint32_t best_f = 0u;
   double   best_score = 0.0;
   uint8_t  i;
+  uint8_t  b1_abort = 0u;   /* B1 中止标志：退出外层 for 循环 */
 
+  s_scan_aborted = 0u;      /* 每次扫描开始前清除中止标志 */
   Screen_ClearResult();
 
   for (i = 0u; i < (uint8_t)(sizeof(candidates) / sizeof(candidates[0u])); ++i)
@@ -953,10 +956,11 @@ static uint32_t FreqScan_Select(void)
     deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
     while ((int32_t)(HAL_GetTick() - deadline) < 0)
     {
-      /* 检测 B1 按键：扫描期间用户可能想切档，提前结束当前频率的扫描 */
+      /* 检测 B1 按键：扫描期间用户可能想切档，提前结束扫描 */
       if (Screen_PeekKey() == SCREEN_KEY_B1)
       {
-        break;  /* 退出扫描，让主循环处理 B1 */
+        b1_abort = 1u;
+        break;  /* 退出当前 while */
       }
 
       if (ADC_Sampler_GetWindow(&window) != 0u)
@@ -966,6 +970,12 @@ static uint32_t FreqScan_Select(void)
       }
       Screen_Poll();
       HAL_Delay(1u);
+    }
+
+    /* B1 中止：退出外层 for 循环，不再扫描剩余频率 */
+    if (b1_abort != 0u)
+    {
+      break;
     }
 
     if ((got == 0u) || (window.sample_count == 0u))
@@ -1003,6 +1013,12 @@ static uint32_t FreqScan_Select(void)
 
   if (best_f == 0u)
   {
+    /* 如果是因为 B1 中止而退出，不设置频率，直接返回 0 */
+    if (b1_abort != 0u)
+    {
+      s_scan_aborted = 1u;   /* 标记扫描被 B1 中止 */
+      return 0u;   /* 不设置频率，避免闪 E04 */
+    }
     (void)Measure_SetFrequency(1000u);
     (void)ADC_Sampler_SetFrequency(1000u);
     return 0u;
@@ -1047,7 +1063,16 @@ void Measure_Init(void)
     Screen_SetStage("LOOP");
     if (detected == 0u)
     {
-      Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+      /* 检查是否因为 B1 中止，如果是则不报 E04 */
+      if (s_scan_aborted != 0u)
+      {
+        s_scan_aborted = 0u;   /* 清除中止标志 */
+        /* 不报 E04，首次扫描时用户不可能按 b1，这里只是统一处理 */
+      }
+      else
+      {
+        Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+      }
     }
   }
 }
@@ -1089,9 +1114,19 @@ void Measure_Service(void)
         else
         {
             Screen_SetStage("LOOP");
-            Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+            /* 检查是否因为 B1 中止，如果是则不报 E04 */
+            if (s_scan_aborted != 0u)
+            {
+                s_scan_aborted = 0u;   /* 清除中止标志 */
+                /* 不报 E04，下一轮处理 b1 切档 */
+            }
+            else
+            {
+                Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+            }
         }
         s_scan_fail_count = 0u;
+        Screen_ClearB0Pending();  /* 清除 b0 pending 标志，允许下次 b0 重新触发 */
         return;
     }
 
@@ -1106,7 +1141,16 @@ void Measure_Service(void)
       else
       {
         Screen_SetStage("LOOP");
-        Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+        /* 检查是否因为 B1 中止，如果是则不报 E04 */
+        if (s_scan_aborted != 0u)
+        {
+          s_scan_aborted = 0u;   /* 清除中止标志 */
+          /* 不报 E04，下一轮处理 b1 切档 */
+        }
+        else
+        {
+          Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+        }
       }
       s_scan_fail_count = 0u;
       return;
@@ -1154,17 +1198,11 @@ void Measure_Service(void)
       HAL_Delay(1u);
     }
 
-    /* B1 提前终止：丢弃当前窗口，立即处理切档 */
+    /* B1 提前终止：设置切档请求，让下一轮 Screen_KeyService() 统一处理
+     * 避免 B1 事件被消费两次（窗口等待中窥视到一次，队列中还有一次） */
     if (b1_abort != 0u)
     {
-      uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
-
-      CircuitID_SetFeedbackResistor(Relay_GetOhm());
-      Screen_ClearResult();
-      Screen_ClearError();
-      Screen_FlushRange();
-      (void)ADC_Sampler_Restart();
-      UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
+      s_range_request = 1u;   /* 设置切档请求，不直接执行 Relay_Next() */
       return;
     }
 

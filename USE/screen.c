@@ -420,34 +420,40 @@ static void Screen_KeyEnqueue(Screen_KeyEvent_t event, uint32_t now)
     if (event == SCREEN_KEY_B0)
     {
         s_beat_reset_pending = 1u;
-
-        /* b0 合并/去重：如果已有待处理的 b0，忽略新的（避免堆积） */
-        primask = __get_PRIMASK();
-        __disable_irq();
-        if (s_b0_pending != 0u)
-        {
-            __set_PRIMASK(primask);
-            return;                /* 已有待处理的 b0，不再重复入队 */
-        }
-        s_b0_pending = 1u;
-        __set_PRIMASK(primask);
     }
 
     primask = __get_PRIMASK();
     __disable_irq();
 
+    /* B0 合并/去重：如果已有待处理的 b0，不再入队，避免堆积多次扫描事件 */
+    if ((event == SCREEN_KEY_B0) && (s_b0_pending != 0u))
+    {
+        __set_PRIMASK(primask);
+        s_rx_lockout_tick = now + 100u;
+        return;                    /* 已有待处理的 b0，只复位 beat，不入队 */
+    }
+
+    /* 检查队列是否满 */
     if ((uint8_t)((s_key_head + 1u) % SCREEN_KEY_QUEUE_SIZE) == s_key_tail)
     {
         s_key_dropped++;
+        __set_PRIMASK(primask);
+        s_rx_lockout_tick = now + 100u;
+        return;                    /* 队列满，丢弃事件 */
     }
-    else
+
+    /* 队列不满，先入队 */
+    s_key_queue[s_key_head] = (uint8_t)event;
+    s_key_head++;
+    if (s_key_head >= SCREEN_KEY_QUEUE_SIZE)
     {
-        s_key_queue[s_key_head] = (uint8_t)event;
-        s_key_head++;
-        if (s_key_head >= SCREEN_KEY_QUEUE_SIZE)
-        {
-            s_key_head = 0u;
-        }
+        s_key_head = 0u;
+    }
+
+    /* 成功入队后，如果是 B0 事件，设置 pending */
+    if (event == SCREEN_KEY_B0)
+    {
+        s_b0_pending = 1u;
     }
 
     __set_PRIMASK(primask);
@@ -797,14 +803,8 @@ void Screen_KeyService(void)
 
     if (event == SCREEN_KEY_B0)
     {
-        /* B0：请求 beat 复位，设置 pending，通知 measure 层重扫 */
-        Screen_RequestBeatReset();
-        if (Screen_IsB0Pending() == 0u)
-        {
-            Screen_ClearB0Pending();  /* 重置标志以便重新设置 */
-        }
-        /* 直接设置 pending，不调用 ClearB0Pending/IsB0Pending */
-        /* 因为 B0 合并/去重逻辑已在 KeyEnqueue 中实现 */
+        /* B0：通知 measure 层重扫
+         * beat 复位已在 Screen_KeyEnqueue() 中设置 s_beat_reset_pending */
         Measure_RequestScan();
     }
     else if (event == SCREEN_KEY_B1)
