@@ -92,8 +92,23 @@ typedef enum
  * 所以主循环被 DFT 窗口阻塞 1 s 时按键不会丢。读即消费。 */
 Screen_KeyEvent_t Screen_PollKey(void);
 
+/* 窥视队列中的下一个按键（不消费）。用于 ADC 窗口等待期间检测 B1。 */
+Screen_KeyEvent_t Screen_PeekKey(void);
+
 /* 立即补发一条 t10（档位），不等 500 ms 整帧刷新。 */
 void Screen_FlushRange(void);
+
+/* 把 t6 心跳清零；下一次刷新显示 beat:0，之后从 0 继续递增。 */
+void Screen_ResetBeat(void);
+
+/* 请求复位 beat（事件到达时调用，由 Screen_Poll 应用）。 */
+void Screen_RequestBeatReset(void);
+
+/* 检查是否有待处理的 b0 重扫请求（非破坏性读取）。 */
+uint8_t Screen_IsB0Pending(void);
+
+/* 清除 b0 待处理标志（主循环开始处理 b0 时调用）。 */
+void Screen_ClearB0Pending(void);
 
 /* 自动扫描选定频率后调用,只更新当前测量频率、清掉上一频率结果并强制刷新；
  * t10 显示反馈电阻档位,与本函数无关。 */

@@ -103,6 +103,12 @@ static uint32_t FreqScan_Select(void)
     deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
     while ((int32_t)(HAL_GetTick() - deadline) < 0)
     {
+      /* 检测 B1 按键：扫描期间用户可能想切档，提前结束当前频率的扫描 */
+      if (Screen_PeekKey() == SCREEN_KEY_B1)
+      {
+        break;  /* 退出扫描，让主循环处理 B1 */
+      }
+
       if (ADC_Sampler_GetWindow(&window) != 0u)
       {
         got = 1u;
@@ -284,7 +290,30 @@ int main(void)
        * 不做 continue：否则会跳过本轮的重扫/失败恢复，b2 事件会延迟一次扫描。 */
     }
 
-    if ((key == SCREEN_KEY_B0) || (scan_fail_count >= 3u))
+    /* b0 合并/去重：只在 s_b0_pending 为真时执行扫描，避免多次 b0 堆积。
+     * beat 复位已在中断中设置标志，由 Screen_Poll() 应用，这里不再调用。 */
+    if (key == SCREEN_KEY_B0)
+    {
+      if (Screen_IsB0Pending() != 0u)
+      {
+        Screen_SetStage("SCAN");
+        if (FreqScan_Select() != 0u)
+        {
+          Screen_SetStage("LOOP");
+        }
+        else
+        {
+          Screen_SetStage("LOOP");
+          Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+        }
+        Screen_ClearB0Pending();
+        scan_fail_count = 0u;
+      }
+      /* 否则：已有待处理的 b0，忽略本次（已在中断中合并） */
+    }
+
+    /* 自动重扫机制：连续失败 3 次后自动重新扫描（与 b0 无关） */
+    if (scan_fail_count >= 3u)
     {
       Screen_SetStage("SCAN");
       if (FreqScan_Select() != 0u)
@@ -320,10 +349,19 @@ int main(void)
       Screen_ClearResult();
     }
 
-    /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。 */
+    /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。
+     * 期间检测 B1：如果用户在等待窗口时按 b1 切档，提前结束当前窗口并立即处理。 */
+    uint8_t b1_abort = 0u;
     deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
     while ((int32_t)(HAL_GetTick() - deadline) < 0)
     {
+      /* 检测 B1 按键：窥视队列，发现 B1 则提前结束窗口 */
+      if (Screen_PeekKey() == SCREEN_KEY_B1)
+      {
+        b1_abort = 1u;
+        break;
+      }
+
       if (ADC_Sampler_GetWindow(&window) != 0u)
       {
         got = 1u;
@@ -333,11 +371,28 @@ int main(void)
       HAL_Delay(1u);
     }
 
+    /* B1 提前终止：丢弃当前窗口，立即处理切档 */
+    if (b1_abort != 0u)
+    {
+      uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
+
+      CircuitID_SetFeedbackResistor(Relay_GetOhm());
+      Screen_ClearResult();
+      Screen_ClearError();
+      Screen_FlushRange();
+      (void)ADC_Sampler_Restart();
+      UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
+      got = 0u;  /* 标记本轮不处理窗口 */
+    }
+
     if (got == 0u)
     {
-      Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
-      Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
-      ++scan_fail_count;
+      if (b1_abort == 0u)  /* 如果是 B1 切档导致的 got=0，不计入超时错误 */
+      {
+        Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
+        Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
+        ++scan_fail_count;
+      }
       continue;
     }
 
