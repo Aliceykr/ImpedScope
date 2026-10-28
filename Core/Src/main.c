@@ -261,11 +261,11 @@ int main(void)
     uint8_t  got = 0u;
     Screen_KeyEvent_t key;
 
-    /* HMI 的 b0(freq_change)：单击 = 强制重扫；双击 = 切换继电器档位。
-     * 必须在每轮循环开头调用一次，单击靠"窗口超时"产生。 */
+    /* HMI 的 b0/b1/b2：b0 单击强制重扫，b1 单击切档，b2 预留无动作。
+     * 必须在每轮循环开头调用一次，事件在中断里入队，阻塞不丢。 */
     key = Screen_PollKey();
 
-    if (key == SCREEN_KEY_DOUBLE)
+    if (key == SCREEN_KEY_B1)
     {
       uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
 
@@ -278,7 +278,13 @@ int main(void)
       continue;
     }
 
-    if ((key == SCREEN_KEY_SINGLE) || (scan_fail_count >= 3u))
+    if (key == SCREEN_KEY_B2)
+    {
+      /* 预留：不切档、不重扫、不显示。
+       * 不做 continue：否则会跳过本轮的重扫/失败恢复，b2 事件会延迟一次扫描。 */
+    }
+
+    if ((key == SCREEN_KEY_B0) || (scan_fail_count >= 3u))
     {
       Screen_SetStage("SCAN");
       if (FreqScan_Select() != 0u)

@@ -18,7 +18,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=39
-EXPECT_CODE=51322
+# 基准取自 b0/b1/b2 三键协议（三字节严格解析 + 中断入队队列 + 双解析器）
+# 的实际编译结果 Code=55890，比旧双击方案的 51322 大约 4.5 KB。
+EXPECT_CODE=55890
 CODE_TOL=400
 fail=0
 
@@ -77,10 +79,13 @@ has Core/Inc/main.h "RELAY_K3_Pin"                             "K3 引脚宏（m
 has Core/Src/gpio.c "RELAY_K1_Pin|RELAY_K2_Pin|RELAY_K3_Pin"   "三个继电器脚被统一配置"
 has Core/Src/main.c "Relay_Init();"                            "上电调用 Relay_Init()"
 has Core/Src/main.c "CircuitID_SetFeedbackResistor(Relay_GetOhm());" "同步固定 R_eff=1500"
-# b0 双击切档
-has Core/Src/main.c "SCREEN_KEY_DOUBLE"                            "b0 双击切档分支"
-has Core/Src/main.c "Screen_PollKey();"                            "Screen_PollKey 每轮调用"
-has USE/relay_range.c "uint8_t Relay_Next(void)"                   "Relay_Next 已实现"
+# 三键字节协议：b0 单击重扫 / b1 单击切档 / b2 预留静默
+has Core/Src/main.c "SCREEN_KEY_B1"          "b1 单击切档分支"
+has Core/Src/main.c "SCREEN_KEY_B0"          "b0 单击重扫分支"
+has Core/Src/main.c "Screen_PollKey();"      "Screen_PollKey 每轮调用"
+has USE/screen.c "SCREEN_KEY_QUEUE_SIZE"     "按键事件中断入队/主循环出队队列"
+has USE/screen.c "Screen_KeyEnqueue"         "三字节完整帧后才入队"
+has USE/relay_range.c "uint8_t Relay_Next(void)" "Relay_Next 已实现"
 # 时钟/串口
 has Core/Src/tim.c "Prescaler = 3"                             "TIM6 PSC=3（300 kHz）"
 has Core/Src/tim.c "Period = 99"                               "TIM6 ARR=99"

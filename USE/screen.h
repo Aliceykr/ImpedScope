@@ -78,21 +78,18 @@ void Screen_FatalReportBlocking(void);
  * t10 仍随整帧刷新,切档时由 Screen_FlushRange() 额外立即补发一次。 */
 void Screen_Poll(void);
 
-/* 单击/双击判定窗口：按下后等这么久没有第二下，就按单击处理。
- * 必须大于 UART 按键的 100 ms 锁定期，否则第二下会被吞掉。 */
-#define SCREEN_DOUBLE_CLICK_MS       300u
-
-/* 按键事件：一次调用最多返回一个。 */
+/* 按键事件：一次调用最多返回一个。b2 也会入队，由调用方决定忽略。 */
 typedef enum
 {
     SCREEN_KEY_NONE = 0u,
-    SCREEN_KEY_SINGLE,      /* 单击：强制重扫频率 */
-    SCREEN_KEY_DOUBLE       /* 双击：切换继电器档位 */
+    SCREEN_KEY_B0,     /* 单击：强制重扫频率 */
+    SCREEN_KEY_B1,     /* 单击：切换继电器档位 */
+    SCREEN_KEY_B2      /* 预留：静默忽略 */
 } Screen_KeyEvent_t;
 
-/* 屏幕 b0(freq_change)：单击 = 强制重扫，双击 = 切换继电器档位。
- * 主循环每轮调用一次（必须每轮都调，否则单击永远出不来）。
- * 内部用中断记录的时间戳判定，不受主循环阻塞影响；读即消费。 */
+/* 屏幕按键 b0/b1/b2：单击即生效，b0 重扫、b1 切档、b2 无动作。
+ * 主循环每轮调用一次。中断只负责把完整帧入队，主循环逐次出队，
+ * 所以主循环被 DFT 窗口阻塞 1 s 时按键不会丢。读即消费。 */
 Screen_KeyEvent_t Screen_PollKey(void);
 
 /* 立即补发一条 t10（档位），不等 500 ms 整帧刷新。 */

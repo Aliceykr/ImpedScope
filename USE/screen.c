@@ -63,17 +63,45 @@ static volatile uint8_t  s_fatal_code;
 static volatile uint8_t  s_fatal_latched;
 static volatile uint8_t  s_uart_ready;
 
-/* 屏幕按键接收: b0(freq_change) 发送 01 01 01,现在作为强制刷新键。 */
+/* 屏幕按键接收: b0/b1/b2(freq_change 等) 各发三字节二进制帧,
+ * 前两字节固定 0x01,第三字节区分按键。三键前两字节相同,
+ * 所以必须收满三字节后才产生事件,不能看到 0x01 就触发。 */
 static uint8_t s_rx_byte;
 static volatile uint8_t s_rx_armed;
 static uint32_t s_rx_lockout_tick;
+
+/* 二进制帧解析状态机: 0=还没收到字节、1=收到第一个 0x01、2=前两字节已确认。
+ * 只在 UART4 中断里访问,无需临界区。
+ * s_key_byte_tick: 进入状态 2(等按键字节)的时刻,用于超时重同步。 */
+static uint8_t s_key_byte_count;
+static uint32_t s_key_byte_tick;
+
+/* 等按键字节的超时。921600 波特下三字节间隔在微秒级,正常帧不会触发;
+ * 超过这个时间才来的第三字节说明上一帧的按键字节已丢失(过载/噪声),
+ * 此时必须复位重同步,否则这个字节会被当成上一帧的按键,
+ * 而它其实是下一帧的帧头 0x01 —— 会被误判成 b0。 */
+#define SCREEN_KEY_BYTE_TIMEOUT_MS  200u
+
+/* ASCII 兼容: 完整匹配 "010101"/"010102"/"010103" 才触发。
+ * 只有完整的 6 字符才触发;中途不匹配立即复位,普通文本里的单个 '1' 不触发。
+ * 按 [按键][字符下标] 排列,三个值只在最后一个字符(下标 5)不同,
+ * 即二进制帧里区分按键的那个第三字节。 */
 static uint8_t s_ascii_key_match;
-static const char s_ascii_key[] = "010101";
-/* 按键点击队列：最多缓存 2 次点击的时间戳，由中断写入、主循环消费。
- * 主循环可能被 DFT 窗口阻塞 1 s，所以时间戳必须取自中断，不能取轮询时刻。 */
-static volatile uint8_t  s_click_count;        /* 0..2 */
-static volatile uint32_t s_click_first_tick;   /* 第一次按下的时刻 */
-static volatile uint32_t s_click_last_tick;    /* 最近一次按下的时刻 */
+static const char s_ascii_keys[3][6] =
+{
+    { '0', '1', '0', '1', '0', '1' },
+    { '0', '1', '0', '1', '0', '2' },
+    { '0', '1', '0', '1', '0', '3' }
+};
+
+/* 按键事件队列: 中断写入、主循环消费。主循环可能被 DFT 窗口阻塞 1 s,
+ * 所以事件必须留在队列里等下一轮,不能只存"当前按键"。 */
+#define SCREEN_KEY_QUEUE_SIZE 4u
+
+static volatile uint8_t s_key_queue[SCREEN_KEY_QUEUE_SIZE];
+static volatile uint8_t s_key_head;    /* 写指针,中断推进 */
+static volatile uint8_t s_key_tail;    /* 读指针,主循环推进 */
+static volatile uint16_t s_key_dropped;/* 队列满而丢弃的事件数,仅诊断 */
 
 /* 自动扫描的五个候选频率,仅用于校验/记录当前测量频率。 */
 #define SCREEN_FREQ_COUNT 5u
@@ -101,11 +129,17 @@ void Screen_Init(void)
     s_last_error_code = 0u;
     s_fatal_latched = 0u;
     s_fatal_code = SCREEN_E01_HAL_INIT;   /* 默认覆盖 MX_*_Init 内的 Error_Handler */
+    /* 置 0 而不是 HAL_GetTick()：锁定期判定是"距上次入队不足 100 ms 就丢"，
+     * 若初始化成当前 tick，则初始化后 100 ms 内的第一次按键必被丢弃。
+     * 置 0 时 HAL_GetTick 上电后从 0 递增，第一个完整帧必然通过；
+     * 32 位回绕后 (uint32_t)(now - 0) 仍是正确的小值。 */
     s_rx_lockout_tick = 0u;
     s_ascii_key_match = 0u;
-    s_click_count = 0u;
-    s_click_first_tick = 0u;
-    s_click_last_tick = 0u;
+    s_key_byte_count = 0u;
+    s_key_byte_tick = 0u;
+    s_key_head = 0u;
+    s_key_tail = 0u;
+    s_key_dropped = 0u;
     s_active_freq_hz = 0u;                /* 0 = 尚未生效 */
     s_rx_armed = 0u;
     for (index = 0u; index <= SCREEN_ERROR_CODE_MAX; ++index)
@@ -116,7 +150,7 @@ void Screen_Init(void)
      *   Screen_Init -> SetStage("PERIPH") -> CircuitID_Init -> SetStage("MODULE")
      * 本函数之后 PERIPH 打点会立即覆盖 s_stage。 */
     s_uart_ready = 1u;                    /* 本函数在 MX_UART4_Init 之后调用 */
-    Screen_RxStart();                     /* 开始接收 b0 按键 */
+    Screen_RxStart();                     /* 开始接收 b0/b1/b2 按键 */
     (void)Screen_SetActiveFreq(1000u);    /* 默认测量频率 1 kHz */
 }
 
@@ -331,45 +365,23 @@ uint8_t Screen_SetActiveFreq(uint32_t frequency_hz)
     return 1u;
 }
 
+/* 队列空返回 SCREEN_KEY_NONE，非空取出队首并推进读指针。
+ * 只在主循环调用，临界区防中断同时改指针。 */
 Screen_KeyEvent_t Screen_PollKey(void)
 {
     Screen_KeyEvent_t event = SCREEN_KEY_NONE;
     uint32_t primask;
-    uint32_t now;
 
-    /* 读快照与改队列必须在同一个临界区内完成：
-     * 若分成两段，两次临界区之间的按键会被误清（ISR 里 ++s_click_count）。 */
     primask = __get_PRIMASK();
     __disable_irq();
 
-    now = HAL_GetTick();
-    if (s_click_count >= 2u)
+    if (s_key_tail != s_key_head)
     {
-        if ((uint32_t)(s_click_last_tick - s_click_first_tick) <= SCREEN_DOUBLE_CLICK_MS)
+        event = (Screen_KeyEvent_t)s_key_queue[s_key_tail];
+        ++s_key_tail;
+        if (s_key_tail >= SCREEN_KEY_QUEUE_SIZE)
         {
-            /* 两下都在窗口内：双击，队列清空。 */
-            s_click_count      = 0u;
-            s_click_first_tick = 0u;
-            s_click_last_tick  = 0u;
-            event = SCREEN_KEY_DOUBLE;
-        }
-        else
-        {
-            /* 两下隔太久：第一下算单击，第二下留作新的待定单击。 */
-            s_click_count      = 1u;
-            s_click_first_tick = s_click_last_tick;
-            event = SCREEN_KEY_SINGLE;
-        }
-    }
-    else if (s_click_count == 1u)
-    {
-        if ((uint32_t)(now - s_click_last_tick) > SCREEN_DOUBLE_CLICK_MS)
-        {
-            /* 窗口过期，没有第二下：单击。 */
-            s_click_count      = 0u;
-            s_click_first_tick = 0u;
-            s_click_last_tick  = 0u;
-            event = SCREEN_KEY_SINGLE;
+            s_key_tail = 0u;
         }
     }
 
@@ -377,57 +389,141 @@ Screen_KeyEvent_t Screen_PollKey(void)
     return event;
 }
 
-/* b0(freq_change) 只认严格匹配的按键值:
- *   1) 单字节 0x01 或连续 0x01 0x01 0x01(第一个 0x01 即触发);
- *   2) 完整的 ASCII 字符串 "010101"。
- * 不能看到任意 '1'(0x31) 就触发:串口屏回显/调试文本里的 "f:1000"
+/* 第三个字节 → 按键事件。0x01=b0、0x02=b1、0x03=b2，其余无效。 */
+static Screen_KeyEvent_t Screen_KeyFromByte(uint8_t byte)
+{
+    switch (byte)
+    {
+        case 0x01u: return SCREEN_KEY_B0;
+        case 0x02u: return SCREEN_KEY_B1;
+        case 0x03u: return SCREEN_KEY_B2;
+        default:    return SCREEN_KEY_NONE;
+    }
+}
+
+/* 把一次完整识别到的按键入队。中断里调用，用临界区保护头尾指针。
+ * 队列满时丢弃新事件并计数，不阻塞中断。 */
+static void Screen_KeyEnqueue(Screen_KeyEvent_t event, uint32_t now)
+{
+    uint32_t primask;
+
+    if ((uint32_t)(now - s_rx_lockout_tick) < 100u)
+    {
+        return;                    /* 100 ms 锁定期内：同一帧/同一次点击不重复触发 */
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    if ((uint8_t)((s_key_head + 1u) % SCREEN_KEY_QUEUE_SIZE) == s_key_tail)
+    {
+        s_key_dropped++;
+    }
+    else
+    {
+        s_key_queue[s_key_head] = (uint8_t)event;
+        s_key_head++;
+        if (s_key_head >= SCREEN_KEY_QUEUE_SIZE)
+        {
+            s_key_head = 0u;
+        }
+    }
+
+    __set_PRIMASK(primask);
+    s_rx_lockout_tick = now + 100u;
+}
+
+/* b0/b1/b2 按键协议:
+ *   1) 二进制三字节帧 01 01 01 / 01 01 02 / 01 01 03,前两字节固定 0x01;
+ *   2) 完整的 ASCII 字符串 "010101" / "010102" / "010103"。
+ * 必须收满三字节(或六个字符)后才产生事件：三者前两字节完全相同，
+ * 看到第一个 0x01 就触发会把 b1/b2 全当成 b0。
+ * 也不能看到普通 ASCII '1'(0x31) 就触发:串口屏回显/调试文本里的 "f:1000"
  * 也含 '1',那会把整屏刷新误当成按键,导致频率和 stage 乱跳。
- * 100 ms 内只认一次,避免 3 个 0x01 被算成多次按键。 */
+ * 识别到完整帧后维持 100 ms 锁定期,避免同一帧被重复解析。 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == UART4)
     {
         uint8_t ch = s_rx_byte;
-        uint8_t key_event = 0u;
+        uint8_t index;
+        uint8_t ascii_matched;
+        Screen_KeyEvent_t event = SCREEN_KEY_NONE;
         uint32_t now;
 
         s_rx_armed = 0u;
+        now = HAL_GetTick();
 
-        if (ch == 0x01u)
+        /* 超时重同步:状态 2 已经等了两个帧头,等按键字节。
+         * 如果这个字节隔了很久才来,说明上一帧的按键字节已丢失
+         * (过载/噪声),这个字节其实是下一帧的帧头 0x01。
+         * 不复位就会把它当成上一帧的按键 → 0x01 恰好是 b0,误触发一次重扫。 */
+        if ((s_key_byte_count == 2u) &&
+            ((uint32_t)(now - s_key_byte_tick) >= SCREEN_KEY_BYTE_TIMEOUT_MS))
         {
-            key_event = 1u;
-            s_ascii_key_match = 0u;
+            s_key_byte_count = 0u;
+            s_key_byte_tick = 0u;
         }
-        else if (ch == (uint8_t)s_ascii_key[s_ascii_key_match])
+
+        /* 二进制帧严格三字节:01 01 01=b0、01 01 02=b1、01 01 03=b2。
+         * 三键前两字节完全相同,所以必须收满三字节后按第三字节区分,
+         * 看到第一个 0x01 就触发会把 b1/b2 全当成 b0。
+         * 严格三状态:少一个帧头(如 01 02)就丢弃,不产生事件——
+         * 否则任意 01 02 噪声/残留字节都会误切档。 */
+        if (s_key_byte_count == 0u)
         {
-            ++s_ascii_key_match;
-            if (s_ascii_key_match >= 6u)
+            if (ch == 0x01u)
             {
-                s_ascii_key_match = 0u;
-                key_event = 1u;
+                s_key_byte_count = 1u;
             }
         }
-        else
+        else if (s_key_byte_count == 1u)
         {
-            s_ascii_key_match = (ch == (uint8_t)s_ascii_key[0]) ? 1u : 0u;
+            s_key_byte_count = (ch == 0x01u) ? 2u : 0u;
+        }
+        else /* == 2:前两字节已确认,这一字节就是按键 */
+        {
+            event = Screen_KeyFromByte(ch);
+            s_key_byte_count = 0u;
         }
 
-        if (key_event != 0u)
+        /* 进入状态 2 的时刻记下来,供下一次字节做超时判定。
+         * 正常帧三字节间隔在微秒级,200 ms 阈值不会误触发。 */
+        if (s_key_byte_count == 2u)
+        {
+            s_key_byte_tick = now;
+        }
+
+        /* ASCII 六字符严格匹配:只有完整 6 字符才触发,中途不匹配立即复位。
+         * 三个按键值前 5 个字符相同,所以只要下标 5 对得上就一定是同一个按键。 */
+        ascii_matched = 0u;
+        for (index = 0u; index < 3u; ++index)
+        {
+            if (ch == (uint8_t)s_ascii_keys[index][s_ascii_key_match])
+            {
+                s_ascii_key_match++;
+                ascii_matched = 1u;
+                if (s_ascii_key_match >= 6u)
+                {
+                    s_ascii_key_match = 0u;
+                    event = Screen_KeyFromByte((uint8_t)(index + 1u));
+                }
+                break;
+            }
+        }
+
+        /* 只在"这一字节根本没匹配上"时复位。
+         * 不能在 event==NONE 时复位:匹配上了但还没收满 6 字符时 event 也是 NONE,
+         * 那样会把刚 ++ 的进度清零,match 永远在 0/1 振荡,ASCII 一个键都触发不了。 */
+        if (ascii_matched == 0u)
+        {
+            s_ascii_key_match = (ch == (uint8_t)s_ascii_keys[0][0]) ? 1u : 0u;
+        }
+
+        if (event != SCREEN_KEY_NONE)
         {
             now = HAL_GetTick();
-            if ((int32_t)(now - s_rx_lockout_tick) >= 0)
-            {
-                if (s_click_count == 0u)
-                {
-                    s_click_first_tick = now;
-                }
-                if (s_click_count < 2u)
-                {
-                    ++s_click_count;
-                }
-                s_click_last_tick = now;
-                s_rx_lockout_tick = now + 100u;     /* 100 ms 锁定期保持原样 */
-            }
+            Screen_KeyEnqueue(event, now);
         }
 
         Screen_RxStart();
@@ -440,8 +536,10 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF |
                                      UART_CLEAR_FEF | UART_CLEAR_PEF);
+        /* 同样置 0:置 HAL_GetTick() 会让出错后 100 ms 内的按键被丢掉。 */
         s_rx_lockout_tick = 0u;
         s_ascii_key_match = 0u;
+        s_key_byte_count = 0u;
         Screen_RxStart();
     }
     else if (huart->Instance == USART3)
