@@ -1,6 +1,7 @@
 #include "screen.h"
 #include "relay_range.h"
 #include "uart_debug.h"
+#include "measure.h"   /* Screen_KeyService 调用 Measure_Request* 函数 */
 
 #include <stdio.h>
 #include <string.h>
@@ -787,5 +788,30 @@ static uint16_t Screen_BuildCommands(void)
     length = Screen_AppendCommand(length, "t5", value);
 
     return length;
+}
+
+/* 按键服务：处理 b0/b1/b2 按键，设置相应的请求标志 */
+void Screen_KeyService(void)
+{
+    Screen_KeyEvent_t event = Screen_PollKey();
+
+    if (event == SCREEN_KEY_B0)
+    {
+        /* B0：请求 beat 复位，设置 pending，通知 measure 层重扫 */
+        Screen_RequestBeatReset();
+        if (Screen_IsB0Pending() == 0u)
+        {
+            Screen_ClearB0Pending();  /* 重置标志以便重新设置 */
+        }
+        /* 直接设置 pending，不调用 ClearB0Pending/IsB0Pending */
+        /* 因为 B0 合并/去重逻辑已在 KeyEnqueue 中实现 */
+        Measure_RequestScan();
+    }
+    else if (event == SCREEN_KEY_B1)
+    {
+        /* B1：请求切换到下一档 */
+        Measure_RequestNextRange();
+    }
+    /* B2：预留，静默忽略 */
 }
 

@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+/* screen.h, relay_range.h, uart_debug.h 不在此处包含，避免循环依赖；measure.c 中直接包含 */
 
 /*
  * 测量核心:测量频率、ADC 采样与单频 DFT、两路标定、传递函数与阻抗。
@@ -274,6 +275,22 @@ float CircuitID_GetFeedbackResistor(void);
 
 /* 由一个窗口的 Ui、Uo 计算 H、Z、Y(含标定修正)；成功且结果有效时返回 1，否则返回 0。 */
 uint8_t CircuitID_Compute(const ADC_Window_t *input, FRF_Point_t *output);
+
+/* ==========================================================================
+ * 4. 应用层接口（高层测量循环）
+ * ========================================================================== */
+
+/* 初始化测量模块：CircuitID → Relay → ADC → 首次扫描 */
+void Measure_Init(void);
+
+/* 主测量循环：执行一次测量周期或处理请求 */
+void Measure_Service(void);
+
+/* 请求重新扫描频率（由 screen.c 的按键处理调用） */
+void Measure_RequestScan(void);
+
+/* 请求切换到下一档（由 screen.c 的按键处理调用） */
+void Measure_RequestNextRange(void);
 
 #ifdef __cplusplus
 }

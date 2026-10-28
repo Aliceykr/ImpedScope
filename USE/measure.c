@@ -7,6 +7,8 @@
 #include "adc.h"
 #include "screen.h"
 #include "tim.h"
+#include "relay_range.h"
+#include "uart_debug.h"
 
 /* 三个 π 常数集中在此定义。 */
 #define MEASURE_PI         3.14159265358979323846
@@ -894,5 +896,300 @@ static uint8_t CircuitID_IsFinite(double value)
     return (uint8_t)((value == value) &&
                      (value <= DBL_MAX) &&
                      (value >= -DBL_MAX));
+}
+
+
+/* ==========================================================================
+ * 5. 应用层：测量循环、扫描、按键请求
+ * ========================================================================== */
+
+/* 单个频率等待窗口完成的超时。默认 1 kHz 时窗口 100 ms;屏幕最低档 100 Hz 时
+ * 100 周期窗口为 1 s,所以取 1500 ms 留 500 ms 裕量。
+ * 注意这是墙钟时间;不要改成"循环计数",HAL_Delay(1) 因 SysTick 的 +1 分频
+ * 实际可能耗 2 ms,计数式超时会翻倍。 */
+#define MEASURE_WAIT_TIMEOUT_MS   1500u
+
+/* 内部状态 */
+static uint8_t s_scan_request;
+static uint8_t s_range_request;
+static uint8_t s_scan_fail_count;
+
+/* 请求函数（由 screen.c 调用） */
+void Measure_RequestScan(void)
+{
+    s_scan_request = 1u;
+}
+
+void Measure_RequestNextRange(void)
+{
+    s_range_request = 1u;
+}
+
+/* 外部信号源只会在 100/300/1k/3k/10k 五档之间切换。
+ * 依次用五个候选频率开一个 DFT 窗口，按 Ui 的单频幅值和相干性选最可信的一档。
+ * 候选顺序把常用的 1k、10k 放前面; 命中一个高相干候选就提前结束。
+ * 返回选中的频率; 五档都没有可信信号时返回 0, 并保持默认 1 kHz。 */
+static uint32_t FreqScan_Select(void)
+{
+  static const uint32_t candidates[] = { 1000u, 10000u, 3000u, 300u, 100u };
+  uint32_t best_f = 0u;
+  double   best_score = 0.0;
+  uint8_t  i;
+
+  Screen_ClearResult();
+
+  for (i = 0u; i < (uint8_t)(sizeof(candidates) / sizeof(candidates[0u])); ++i)
+  {
+    uint32_t     f = candidates[i];
+    uint32_t     deadline;
+    uint8_t      got = 0u;
+    ADC_Window_t window;
+
+    if (ADC_Sampler_SetFrequency(f) == 0u)
+    {
+      continue;
+    }
+
+    deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+    while ((int32_t)(HAL_GetTick() - deadline) < 0)
+    {
+      /* 检测 B1 按键：扫描期间用户可能想切档，提前结束当前频率的扫描 */
+      if (Screen_PeekKey() == SCREEN_KEY_B1)
+      {
+        break;  /* 退出扫描，让主循环处理 B1 */
+      }
+
+      if (ADC_Sampler_GetWindow(&window) != 0u)
+      {
+        got = 1u;
+        break;
+      }
+      Screen_Poll();
+      HAL_Delay(1u);
+    }
+
+    if ((got == 0u) || (window.sample_count == 0u))
+    {
+      continue;
+    }
+
+    {
+      double n = (double)window.sample_count;
+      double ui_mag = 2.0 * sqrt((window.ui_re * window.ui_re) +
+                                 (window.ui_im * window.ui_im)) / n;
+      double ui_coh = 0.0;
+      double score;
+
+      if (window.ui_rms > 0.0)
+      {
+        ui_coh = ui_mag / (1.41421356237 * window.ui_rms);
+      }
+
+      score = ui_mag * ui_coh;
+      if ((ui_mag > (double)CIR_INPUT_MIN_AMP) && (ui_coh > 0.5) &&
+          (score > best_score))
+      {
+        best_score = score;
+        best_f = f;
+
+        /* 相干性接近 1, 已经确定是这一档, 不必再等更低的候选频率。 */
+        if (ui_coh > 0.95)
+        {
+          break;
+        }
+      }
+    }
+  }
+
+  if (best_f == 0u)
+  {
+    (void)Measure_SetFrequency(1000u);
+    (void)ADC_Sampler_SetFrequency(1000u);
+    return 0u;
+  }
+
+  (void)Measure_SetFrequency(best_f);
+  (void)ADC_Sampler_SetFrequency(best_f);
+  (void)Screen_SetActiveFreq(best_f);
+  return best_f;
+}
+
+/* 初始化测量模块：CircuitID → Relay → ADC → 首次扫描 */
+void Measure_Init(void)
+{
+  CircuitID_Init();
+
+  /* 反馈电阻量程：三路继电器上电只闭合默认档 K2（1.5 kΩ），
+   * 再把固定 R_eff 交给 CircuitID。必须在 ADC_Sampler_Init() 之前完成。 */
+  Relay_Init();
+  CircuitID_SetFeedbackResistor(Relay_GetOhm());
+
+  Screen_SetStage("MODULE");
+
+  {
+    /* 只调用一次:返回 2 = 双 ADC 同步配置未生效(报 E16),0 = 其它初始化失败(E01)。
+     * 前者是"静默失效"防护,配置丢失不会自己报错,只会让 H/Z/Y 悄悄偏掉。 */
+    uint8_t adc_init = ADC_Sampler_Init();
+
+    if (adc_init == 2u)
+    {
+      Screen_Fatal(SCREEN_E16_ADC_DUAL_MODE);
+    }
+    if (adc_init != 1u)
+    {
+      Screen_Fatal(SCREEN_E01_HAL_INIT);
+    }
+  }
+  Screen_SetStage("SCAN");
+  {
+    uint32_t detected = FreqScan_Select();
+
+    Screen_SetStage("LOOP");
+    if (detected == 0u)
+    {
+      Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+    }
+  }
+}
+
+/* 主测量循环：执行一次测量周期或处理请求 */
+void Measure_Service(void)
+{
+    uint32_t f;
+    ADC_Window_t window;
+    FRF_Point_t frf_point;
+    uint32_t deadline;
+    uint8_t  got = 0u;
+    uint8_t  b1_abort = 0u;
+
+    /* 处理切档请求 */
+    if (s_range_request != 0u)
+    {
+        s_range_request = 0u;
+        uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
+
+        CircuitID_SetFeedbackResistor(Relay_GetOhm());
+        Screen_ClearResult();
+        Screen_ClearError();
+        Screen_FlushRange();
+        (void)ADC_Sampler_Restart();
+        UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
+        return;
+    }
+
+    /* 处理重扫请求 */
+    if (s_scan_request != 0u)
+    {
+        s_scan_request = 0u;
+        Screen_SetStage("SCAN");
+        if (FreqScan_Select() != 0u)
+        {
+            Screen_SetStage("LOOP");
+        }
+        else
+        {
+            Screen_SetStage("LOOP");
+            Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+        }
+        s_scan_fail_count = 0u;
+        return;
+    }
+
+    /* 自动重扫机制：连续失败 3 次后自动重新扫描（与 b0 无关） */
+    if (s_scan_fail_count >= 3u)
+    {
+      Screen_SetStage("SCAN");
+      if (FreqScan_Select() != 0u)
+      {
+        Screen_SetStage("LOOP");
+      }
+      else
+      {
+        Screen_SetStage("LOOP");
+        Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+      }
+      s_scan_fail_count = 0u;
+      return;
+    }
+
+    f = Measure_GetFrequency();
+
+    /* 外部信号源必须同步到同一频率,固件只改自己的 DFT/窗口频率。 */
+    Freq_SourceSet(f);                    /* 空实现:激励由外部信号源提供,固件不设定 */
+    if (ADC_Sampler_SetFrequency(f) == 0u)
+    {
+      Screen_ReportError(SCREEN_E02_CIR_CFG);
+      Screen_ClearResult();
+      ++s_scan_fail_count;
+      Screen_Poll();
+      HAL_Delay(10u);
+      return;
+    }
+
+    /* ADC 已按 f 开始新窗口,这时才让 t10 显示 f。
+     * 若显示频率变了,清掉上一频率的读数,避免 t0~t9 还是旧频率的结果。 */
+    if (Screen_SetActiveFreq(f) != 0u)
+    {
+      Screen_ClearResult();
+    }
+
+    /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。
+     * 期间检测 B1：如果用户在等待窗口时按 b1 切档，提前结束当前窗口并立即处理。 */
+    deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+    while ((int32_t)(HAL_GetTick() - deadline) < 0)
+    {
+      /* 检测 B1 按键：窥视队列，发现 B1 则提前结束窗口 */
+      if (Screen_PeekKey() == SCREEN_KEY_B1)
+      {
+        b1_abort = 1u;
+        break;
+      }
+
+      if (ADC_Sampler_GetWindow(&window) != 0u)
+      {
+        got = 1u;
+        break;
+      }
+      Screen_Poll();
+      HAL_Delay(1u);
+    }
+
+    /* B1 提前终止：丢弃当前窗口，立即处理切档 */
+    if (b1_abort != 0u)
+    {
+      uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
+
+      CircuitID_SetFeedbackResistor(Relay_GetOhm());
+      Screen_ClearResult();
+      Screen_ClearError();
+      Screen_FlushRange();
+      (void)ADC_Sampler_Restart();
+      UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
+      return;
+    }
+
+    if (got == 0u)
+    {
+      Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
+      Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
+      ++s_scan_fail_count;
+      return;
+    }
+
+    /* 新窗口开始计算前清掉上一窗口的错误显示；若本窗口仍异常，
+     * CircuitID_Compute() 会通过 Screen_ReportError() 重新置位。 */
+    Screen_ClearError();
+
+    if (CircuitID_Compute(&window, &frf_point) != 0u)
+    {
+      Screen_SetResult(&frf_point);
+      UartDebug_LogMeasurement(&frf_point, &window, Relay_Get());
+      s_scan_fail_count = 0u;
+    }
+    else
+    {
+      Screen_ClearResult();               /* 计算失败同样清掉旧读数 */
+      ++s_scan_fail_count;
+    }
 }
 

@@ -7,8 +7,7 @@ extern "C" {
 
 #include "main.h"
 #include "usart.h"
-#include "measure.h"
-
+#include "measure.h"   /* Screen_SetResult 使用 FRF_Point_t 类型 */
 /* 串口屏刷新周期。 */
 #define SCREEN_REFRESH_PERIOD_MS     500u
 
@@ -109,6 +108,9 @@ uint8_t Screen_IsB0Pending(void);
 
 /* 清除 b0 待处理标志（主循环开始处理 b0 时调用）。 */
 void Screen_ClearB0Pending(void);
+
+/* 按键服务：处理 b0/b1/b2 按键，设置相应的请求标志 */
+void Screen_KeyService(void);
 
 /* 自动扫描选定频率后调用,只更新当前测量频率、清掉上一频率结果并强制刷新；
  * t10 显示反馈电阻档位,与本函数无关。 */
