@@ -1,0 +1,2 @@
+# 保持 shell 脚本为 LF：CRLF 会让 bash 报 "$'\r': command not found"
+*.sh text eol=lf

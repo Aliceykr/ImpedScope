@@ -47,6 +47,15 @@ float Relay_GetOhm(void)
     return s_ohm[s_index];
 }
 
+float Relay_GetNominalOhm(uint8_t index)
+{
+    if (index >= RELAY_COUNT)
+    {
+        return 0.0f;
+    }
+    return s_ohm[index];
+}
+
 uint8_t Relay_Set(uint8_t index)
 {
     if (index >= RELAY_COUNT)

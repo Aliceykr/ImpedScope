@@ -915,6 +915,11 @@ static uint8_t s_range_request;
 static uint8_t s_scan_fail_count;
 static uint8_t s_scan_aborted;   /* 扫描被 B1 中止标志 */
 
+/* 自动量程状态。s_autorange_toggle 由按键层置位，Measure_Service() 消费。 */
+static uint8_t s_autorange_on;
+static uint8_t s_autorange_toggle;
+static uint8_t s_autorange_upshift_count;   /* 连续"该升增益"的窗口数 */
+
 /* 请求函数（由 screen.c 调用） */
 void Measure_RequestScan(void)
 {
@@ -924,6 +929,27 @@ void Measure_RequestScan(void)
 void Measure_RequestNextRange(void)
 {
     s_range_request = 1u;
+}
+
+void Measure_RequestAutoRangeToggle(void)
+{
+    s_autorange_toggle = 1u;
+}
+
+/* 切换自动量程开关，并同步屏幕与日志。
+ * 只由 Measure_Service() 在主循环上下文调用（不要在中断里调：会用 UART 和 GPIO）。 */
+uint8_t Measure_ToggleAutoRange(void)
+{
+    s_autorange_on = (s_autorange_on != 0u) ? 0u : 1u;
+    s_autorange_upshift_count = 0u;
+    Screen_FlushRange();                            /* t10 的 " A" 立即更新 */
+    UartDebug_Printf("AUTORANGE %u\r\n", (unsigned)s_autorange_on);
+    return s_autorange_on;
+}
+
+uint8_t Measure_IsAutoRange(void)
+{
+    return s_autorange_on;
 }
 
 /* 外部信号源只会在 100/300/1k/3k/10k 五档之间切换。
@@ -1030,6 +1056,127 @@ static uint32_t FreqScan_Select(void)
   return best_f;
 }
 
+/* ==========================================================================
+ * 6. 自动量程评估
+ * ========================================================================== */
+
+/* 切到指定档并让后续测量从干净窗口开始。 */
+static void Measure_ApplyRange(uint8_t index)
+{
+    if (Relay_Set(index) == 0u)
+    {
+        return;
+    }
+    CircuitID_SetFeedbackResistor(Relay_GetOhm());
+    Screen_ClearResult();
+    Screen_ClearError();
+    Screen_FlushRange();
+    (void)ADC_Sampler_Restart();
+    UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)index, (long)Relay_GetOhm());
+}
+
+/* 返回 1 表示本窗口已经切档（调用方应直接 return，不计算不显示）。 */
+static uint8_t Measure_AutoRangeStep(const ADC_Window_t *window)
+{
+    double   n;
+    double   uo_code;
+    double   uo_v;
+    uint32_t clip;
+    uint8_t  cur;
+    uint8_t  best;
+    uint8_t  best_valid;
+    double   best_score;
+    uint8_t  i;
+
+    n       = (double)window->sample_count;
+    uo_code = 2.0 * sqrt((window->uo_re * window->uo_re) +
+                         (window->uo_im * window->uo_im)) / n;
+    uo_v    = uo_code * (double)ADC_SAMPLER_LSB_TO_V;
+    clip    = window->clip.uo_low + window->clip.uo_high;
+    cur     = Relay_Get();
+
+    /* 没信号：不参与选档，交给 CircuitID_Compute() 报 E05。 */
+    if (uo_code < MEASURE_AR_MIN_CODE)
+    {
+        s_autorange_upshift_count = 0u;
+        return 0u;
+    }
+
+    /* 削顶或已经逼近满量程：立即降增益（外推不可信，只退一档）。 */
+    if ((clip * 1000u > (uint32_t)CIR_CLIP_MAX_PERMILLE * window->sample_count) ||
+        (uo_v >= MEASURE_AR_MAX_V))
+    {
+        s_autorange_upshift_count = 0u;
+        if (cur > 0u)
+        {
+            Measure_ApplyRange((uint8_t)(cur - 1u));
+            return 1u;
+        }
+        return 0u;                       /* 已是最小电阻档，让 E20 正常报 */
+    }
+
+    /* 按"最接近目标"选档，排除会削顶的候选。 */
+    best       = cur;
+    best_valid = 0u;
+    best_score = 0.0;
+
+    for (i = 0u; i < RELAY_COUNT; ++i)
+    {
+        double r_i   = (double)Relay_GetNominalOhm(i);
+        double r_cur = (double)Relay_GetNominalOhm(cur);
+        double pred;
+        double score;
+
+        if ((r_i <= 0.0) || (r_cur <= 0.0))
+        {
+            continue;
+        }
+
+        pred = uo_v * r_i / r_cur;
+        if (pred > MEASURE_AR_MAX_V)
+        {
+            continue;
+        }
+        if (pred <= 0.0)
+        {
+            continue;
+        }
+
+        score = fabs(log(pred / MEASURE_AR_TARGET_V));
+        if ((best_valid == 0u) || (score < best_score))
+        {
+            best_valid = 1u;
+            best_score = score;
+            best       = i;
+        }
+    }
+
+    if ((best_valid == 0u) || (best == cur))
+    {
+        s_autorange_upshift_count = 0u;
+        return 0u;
+    }
+
+    if (best < cur)
+    {
+        /* 降增益：立即执行。 */
+        s_autorange_upshift_count = 0u;
+        Measure_ApplyRange(best);
+        return 1u;
+    }
+
+    /* 升增益：连续 N 个窗口确认。 */
+    ++s_autorange_upshift_count;
+    if (s_autorange_upshift_count >= MEASURE_AR_UPSHIFT_WINDOWS)
+    {
+        s_autorange_upshift_count = 0u;
+        Measure_ApplyRange(best);
+        return 1u;
+    }
+
+    return 0u;
+}
+
 /* 初始化测量模块：CircuitID → Relay → ADC → 首次扫描 */
 void Measure_Init(void)
 {
@@ -1039,6 +1186,11 @@ void Measure_Init(void)
    * 再把固定 R_eff 交给 CircuitID。必须在 ADC_Sampler_Init() 之前完成。 */
   Relay_Init();
   CircuitID_SetFeedbackResistor(Relay_GetOhm());
+
+  /* 初始化自动量程状态 */
+  s_autorange_on = 0u;
+  s_autorange_toggle = 0u;
+  s_autorange_upshift_count = 0u;
 
   Screen_SetStage("MODULE");
 
@@ -1087,10 +1239,26 @@ void Measure_Service(void)
     uint8_t  got = 0u;
     uint8_t  b1_abort = 0u;
 
+    /* 处理自动量程开关请求 */
+    if (s_autorange_toggle != 0u)
+    {
+        s_autorange_toggle = 0u;
+        (void)Measure_ToggleAutoRange();    /* 内部负责翻转、刷 t10、打日志 */
+        return;
+    }
+
     /* 处理切档请求 */
     if (s_range_request != 0u)
     {
         s_range_request = 0u;
+
+        if (s_autorange_on != 0u)
+        {
+            s_autorange_on = 0u;                    /* 手动接管，先退出自动 */
+            s_autorange_upshift_count = 0u;
+            UartDebug_Printf("AUTORANGE 0\r\n");
+        }
+
         uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
 
         CircuitID_SetFeedbackResistor(Relay_GetOhm());
@@ -1212,6 +1380,15 @@ void Measure_Service(void)
       Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
       ++s_scan_fail_count;
       return;
+    }
+
+    /* 自动量程：每个窗口评估一次；切了档就丢掉本窗口，重新测。 */
+    if (s_autorange_on != 0u)
+    {
+        if (Measure_AutoRangeStep(&window) != 0u)
+        {
+            return;                 /* 已切档并重启窗口，本窗口不计算、不显示 */
+        }
     }
 
     /* 新窗口开始计算前清掉上一窗口的错误显示；若本窗口仍异常，

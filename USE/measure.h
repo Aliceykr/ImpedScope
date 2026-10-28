@@ -292,6 +292,32 @@ void Measure_RequestScan(void);
 /* 请求切换到下一档（由 screen.c 的按键处理调用） */
 void Measure_RequestNextRange(void);
 
+/* ==========================================================================
+ * 5. 自动量程
+ * ========================================================================== */
+
+/* 自动量程目标 Uo 峰值（半量程，满摆幅 1.65 V 的一半） */
+#define MEASURE_AR_TARGET_V          0.8f
+
+/* 预测超过此电压就算"会削顶"，不能选（1.65 V 满摆幅留 0.15 V 余量） */
+#define MEASURE_AR_MAX_V             1.5f
+
+/* Uo 低于此码值视为"没信号"，不参与选档 */
+#define MEASURE_AR_MIN_CODE          4.0f
+
+/* 升增益需要的连续确认窗口数 */
+#define MEASURE_AR_UPSHIFT_WINDOWS   2u
+
+/* B2：切换自动量程开关。返回切换后的状态（1=开，0=关）。 */
+uint8_t Measure_ToggleAutoRange(void);
+
+/* 当前自动量程是否开启。 */
+uint8_t Measure_IsAutoRange(void);
+
+/* 由 Screen_KeyService() 调用：登记一次开关请求，由 Measure_Service() 执行。
+ * 与 Measure_RequestScan()/Measure_RequestNextRange() 同一套路。 */
+void Measure_RequestAutoRangeToggle(void);
+
 #ifdef __cplusplus
 }
 #endif

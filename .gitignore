@@ -30,5 +30,8 @@ JLinkLog.txt
 # .ccg-build 脚本的编译输出目录
 .ccg-build/verify-out/
 .ccg-build/build-*/
-# 根目录编译输出目录（build.sh 指定 outdir=build-revN 时）
-build-rev*/
+# 临时编译输出目录（build.sh 指定任意 outdir，如 build-rev7 / build_autorange / build-rv）
+build*/
+
+# 给实施 agent 的计划文档：只作为工作稿，不进版本库
+PLAN-*.md

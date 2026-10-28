@@ -99,6 +99,7 @@ static uint32_t s_active_freq_hz;          /* 当前真正在测量的频率 */
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value);
 static uint16_t Screen_BuildCommands(void);
 static const char *Screen_RangeText(void);
+static void Screen_RangeValue(char *buffer, uint32_t size);
 static void Screen_SendStatusBlocking(const char *value, uint32_t timeout);
 static void Screen_SendStatusRaw(const char *value);
 static void Screen_RxStart(void);
@@ -611,7 +612,7 @@ void Screen_FlushRange(void)
     uint16_t length = 0u;
     char value[SCREEN_VALUE_CHARS];
 
-    (void)snprintf(value, sizeof(value), "R:%s", Screen_RangeText());
+    Screen_RangeValue(value, sizeof(value));
     length = Screen_AppendCommand(length, "t10", value);
     if (length == 0u)
     {
@@ -637,6 +638,14 @@ static const char *Screen_RangeText(void)
         case 2u: return "15k";
         default: return "?";
     }
+}
+
+/* 生成 t10 的文本：R:1.5k，自动模式时追加 " A"。 */
+static void Screen_RangeValue(char *buffer, uint32_t size)
+{
+    (void)snprintf(buffer, size, "R:%s%s",
+                   Screen_RangeText(),
+                   (Measure_IsAutoRange() != 0u) ? " A" : "");
 }
 
 static uint16_t Screen_AppendCommand(uint16_t length, const char *name, const char *value)
@@ -763,8 +772,8 @@ static uint16_t Screen_BuildCommands(void)
     length = Screen_AppendCommand(length, "t9", value);
 
     /* t10:当前反馈电阻档位(标称值,便于和三档定义对应)。
-     * H 相位 A 不再显示。 */
-    (void)snprintf(value, sizeof(value), "R:%s", Screen_RangeText());
+     * 自动模式时追加 " A" 后缀。 */
+    Screen_RangeValue(value, sizeof(value));
     length = Screen_AppendCommand(length, "t10", value);
 
     /* t6:心跳,每刷新周期 +1 */
@@ -812,6 +821,10 @@ void Screen_KeyService(void)
         /* B1：请求切换到下一档 */
         Measure_RequestNextRange();
     }
-    /* B2：预留，静默忽略 */
+    else if (event == SCREEN_KEY_B2)
+    {
+        /* B2：切换自动量程开关 */
+        Measure_RequestAutoRangeToggle();
+    }
 }
 

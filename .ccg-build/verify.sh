@@ -18,9 +18,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=39
-# 基准取自 b0/b1/b2 三键协议（三字节严格解析 + 中断入队队列 + 双解析器）
-# 的实际编译结果 Code=55890，比旧双击方案的 51322 大约 4.5 KB。
-EXPECT_CODE=55890
+# 基准取自当前版本（b0/b1/b2 三键 + b2 自动量程）的实际编译结果。
+EXPECT_CODE=53210
 CODE_TOL=400
 fail=0
 
@@ -61,7 +60,7 @@ else
     bad "拿不到 Program Size"
 fi
 
-echo "== 2/3 生成区关键配置 =="
+echo "== 2/3 关键配置 =="
 # ADC：同步模式在 USER CODE 里，DMA 字对齐在生成区里，两边都要在
 has Core/Src/adc.c "ADC_DUALMODE_REGSIMULT"                    "双 ADC 同步模式"
 has Core/Src/adc.c "ADC_DUALMODEDATAFORMAT_32_10_BITS"         "32 位打包格式"
@@ -77,15 +76,23 @@ has Core/Inc/main.h "RELAY_K1_Pin"                             "K1 引脚宏（m
 has Core/Inc/main.h "RELAY_K2_Pin"                             "K2 引脚宏（main.h）"
 has Core/Inc/main.h "RELAY_K3_Pin"                             "K3 引脚宏（main.h）"
 has Core/Src/gpio.c "RELAY_K1_Pin|RELAY_K2_Pin|RELAY_K3_Pin"   "三个继电器脚被统一配置"
-has Core/Src/main.c "Relay_Init();"                            "上电调用 Relay_Init()"
-has Core/Src/main.c "CircuitID_SetFeedbackResistor(Relay_GetOhm());" "同步固定 R_eff=1500"
-# 三键字节协议：b0 单击重扫 / b1 单击切档 / b2 预留静默
-has Core/Src/main.c "SCREEN_KEY_B1"          "b1 单击切档分支"
-has Core/Src/main.c "SCREEN_KEY_B0"          "b0 单击重扫分支"
-has Core/Src/main.c "Screen_PollKey();"      "Screen_PollKey 每轮调用"
-has USE/screen.c "SCREEN_KEY_QUEUE_SIZE"     "按键事件中断入队/主循环出队队列"
-has USE/screen.c "Screen_KeyEnqueue"         "三字节完整帧后才入队"
-has USE/relay_range.c "uint8_t Relay_Next(void)" "Relay_Next 已实现"
+# 初始化与按键服务在重构后位于 measure.c / screen.c（main.c 只剩三个高层调用）
+has Core/Src/main.c "Measure_Service();"                       "主循环调用 Measure_Service()"
+has Core/Src/main.c "Screen_KeyService();"                     "主循环调用 Screen_KeyService()"
+has USE/measure.c "Relay_Init();"                              "上电调用 Relay_Init()"
+has USE/measure.c "CircuitID_SetFeedbackResistor(Relay_GetOhm());" "同步反馈电阻 R_eff"
+has USE/screen.c "SCREEN_KEY_B0"                               "b0 单击重扫分支"
+has USE/screen.c "SCREEN_KEY_B1"                               "b1 单击切档分支"
+has USE/screen.c "SCREEN_KEY_B2"                               "b2 自动量程分支"
+has USE/screen.c "Screen_PollKey"                              "按键出队（Screen_PollKey）"
+has USE/screen.c "SCREEN_KEY_QUEUE_SIZE"                       "按键中断入队/主循环出队队列"
+has USE/screen.c "Screen_KeyEnqueue"                           "按键入队函数"
+has USE/relay_range.c "uint8_t Relay_Next(void)"               "Relay_Next 已实现"
+# 自动量程
+has USE/measure.c "Measure_AutoRangeStep"                      "自动量程评估函数"
+has USE/measure.c "Measure_ToggleAutoRange"                    "自动量程开关"
+has USE/measure.h "MEASURE_AR_TARGET_V"                        "自动量程目标电压宏"
+has USE/screen.c "Measure_IsAutoRange"                         "t10 显示自动量程状态"
 # 时钟/串口
 has Core/Src/tim.c "Prescaler = 3"                             "TIM6 PSC=3（300 kHz）"
 has Core/Src/tim.c "Period = 99"                               "TIM6 ARR=99"
