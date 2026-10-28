@@ -32,7 +32,7 @@
 - `Uo` 的交流摆幅设计为 0.15–1.5 V（围绕 1.65 V），即 0.15–3.15 V，落在 ADC 的 0–3.3 V 内。
 - 三路独立继电器（高电平闭合）各串一只反馈电阻，并联在 `Uo` 与虚地之间：**K1=150 Ω / K2=1.5 kΩ / K3=15 kΩ**。
 - 本版上电只闭合 **K2**，上电时 `R_eff = 1500 Ω`（双击可切）；继电器接触电阻（<1 Ω）相对最小档 150 Ω 可忽略，按标称值使用。
-- GPIO（**PE2/PE3/PE4**）只驱动继电器模块的逻辑输入，模块自带三极管/MOS 驱动与续流。
+- GPIO（**PE3/PE4/PE6**）只驱动继电器模块的逻辑输入，模块自带三极管/MOS 驱动与续流。
 
 ### 2.2 数字部分
 
@@ -73,7 +73,7 @@
 | ADC2 | PA1_C | `ADC2_INP1`，模拟 | `Uo` |
 | UART4 | PC10 / PC11 | AF8，921600 8N1 | 串口屏 TX/RX |
 | USART3 | PB10 | AF7，921600 8N1，TX-only | 调试日志 |
-| 继电器 K1/K2/K3 | PE2 / PE3 / PE4 | GPIO 推挽输出 | 量程选择（上电默认 K2，b0 双击切档） |
+| 继电器 K1/K2/K3 | PE3 / PE4 / PE6 | GPIO 推挽输出 | 量程选择（上电默认 K2，b0 双击切档） |
 | TIM6 | 内部 | PSC=3，ARR=99 | 300 kHz TRGO |
 | SWD | PA13 / PA14 | Serial Wire | 调试/下载 |
 | HSE | PH0 / PH1 | 外部晶振 | 系统时钟 |
@@ -196,9 +196,9 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 | 通道 | GPIO | 电阻 | 上电后状态 | 覆盖 \|Y\|（Uo 0.15–1.5 V，参考） |
 |---|---|---|---|---|
-| K1 | PE2 | 150 Ω | 断开（低） | 1.2–12 mS |
-| K2 | PE3 | 1.5 kΩ | **闭合（高，默认档）** | 0.188–1.88 mS |
-| K3 | PE4 | 15 kΩ | 断开（低） | 19.9–198.7 µS |
+| K1 | PE3 | 150 Ω | 断开（低） | 1.2–12 mS |
+| K2 | PE4 | 1.5 kΩ | **闭合（高，默认档）** | 0.188–1.88 mS |
+| K3 | PE6 | 15 kΩ | 断开（低） | 19.9–198.7 µS |
 
 - 高电平 = 继电器线圈得电 = 触点闭合；低电平/GND = 断开。三路**独立**，任意时刻最多闭合一路。
 - 每路：`Uo → 继电器触点 → 反馈电阻 → 虚地（1.65 V）`，三路并联；触点只承受小信号（≤1.5 V、≤5 mA）。
@@ -207,7 +207,7 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 ### 8.2 上电时序与运行期切档
 
-- `MX_GPIO_Init()`（CubeMX 生成）配 PE2/PE3/PE4 为推挽输出并写低；`Relay_Init()` 只做上电时序：三路全低（断开）→ 等 10 ms 释放 → 只把 PE3 拉高（K2 = 1.5 kΩ）→ 等 10 ms 吸合。
+- `MX_GPIO_Init()`（CubeMX 生成）配 PE3/PE4/PE6 为推挽输出并写低；`Relay_Init()` 只做上电时序：三路全低（断开）→ 等 10 ms 释放 → 只把 PE4 拉高（K2 = 1.5 kΩ）→ 等 10 ms 吸合。
 - `CircuitID_SetFeedbackResistor(Relay_GetOhm())` 同步固定 `R_eff = 1500 Ω`，与 `s_calib`（Rf=1500）和 `CIR_FEEDBACK_RESISTOR_OHM` 对齐。
 - **本版不做自动量程**；运行期切档由 b0 **双击**触发（`Relay_Set()`/`Relay_Next()`，1.5k → 15k → 150 → 1.5k 循环），不按 `Uo` 幅值/削波自动换档。
 - 上电三路全断到 K2 闭合之间 TIA 开环、`Uo` 可能撞轨；`Relay_Init()` 在 `ADC_Sampler_Init()` 之前完成，不会采到无效窗口。
@@ -426,7 +426,7 @@ bash .ccg-build/build.sh <outdir>
 CubeMX 重新生成后检查：
 
 1. Keil 工程仍包含 `measure.c`、`screen.c`、`relay_range.c`、`uart_debug.c`，头文件路径含 `../USE`。
-2. `.ioc`：PE2/PE3/PE4 为 `GPIO_Output`（标签 `RELAY_K1/K2/K3`）；PB10 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
+2. `.ioc`：PE3/PE4/PE6 为 `GPIO_Output`（标签 `RELAY_K1/K2/K3`）；PB10 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
 3. `main.c` USER CODE 区仍调用 `Screen_Init()`、`Relay_Init()`、`CircuitID_Init()`、`ADC_Sampler_Init()`、`UartDebug_Init()`、`FreqScan_Select()`、`Screen_Poll()`、`UartDebug_LogMeasurement()`。
 4. `adc.c` 的 `ADC_DUALMODE_REGSIMULT`/`DualModeData`/`TwoSamplingDelay` 仍在 `USER CODE BEGIN ADC1_Init 2` 区；ADC1 的 DMA 为 Word 对齐。
 5. TIM6 的 PSC/ARR 与 `ADC_SAMPLER_RATE_HZ` 一致；SPI1 仍为主机但无设备。
@@ -437,13 +437,13 @@ CubeMX 重新生成后检查：
 已通过：
 
 - ArmClang 编译 + 链接：**39 files, 0 errors**；Program Size：Code 51322、RO-data 2378、RW-data 28、ZI-data 4988。
-- `.ioc` 与代码的引脚/实例一致性检查：PE2/PE3/PE4（`RELAY_K1/K2/K3`）、PB10/USART3、PC10/11/UART4。
+- `.ioc` 与代码的引脚/实例一致性检查：PE3/PE4/PE6（`RELAY_K1/K2/K3`）、PB10/USART3、PC10/11/UART4。
 - 固件源码（`USE/`、`Core/`）静态检查：无 `analog_switch` / `Switch_*` / `SW_ENABLE` / `Screen_TakeRefreshKey` 残留。
 
 待上板：
 
 - USART3 921600 日志（T1）、与串口屏共存（T2）、速率/丢行（T3/T4）、中断影响（T5）、误码（T6）、回归（T7）。
-- 继电器上电默认（R1）：PE2/PE3/PE4 = 0 V / 3.3 V / 0 V（K1 断、K2 合、K3 断）；K2 触点通断约 1.5 kΩ（R2）。
+- 继电器上电默认（R1）：PE3/PE4/PE6 = 0 V / 3.3 V / 0 V（K1 断、K2 合、K3 断）；K2 触点通断约 1.5 kΩ（R2）。
 - 上电默认档 `R_eff = 1500 Ω`（R3）、1 kΩ 已知 DUT 的 |Y| ≈ 1 mS（R4）、30 s 观察无自动切档（R5）、断电/上电 10 次重复性（R6）。
 - b0 双击切档（编号 B1–B9，与 USART3 的 T、继电器组的 R 区分）：B1 单击 300 ms 后重扫；B2 双击 200 ms 间隔 1.5k→15k 且 `t10` 立即变 `R:15k`；B4 间隔 500 ms 两次按下 = 两次单击（两次重扫）；B5 100 Hz 档下双击仍识别；B6 双击后测量用新 `R_eff`。
 
