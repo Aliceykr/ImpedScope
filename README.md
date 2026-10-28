@@ -1,6 +1,6 @@
 # STM32 黑盒电路频响辨识
 
-> 适用硬件：STM32H750XBH6，3.3 V 单电源 · 文档版本：v3.0（2026-10-27），按当前固件实现编写
+> 适用硬件：STM32H750XBH6，3.3 V 单电源 · 文档版本：v3.1（2026-10-28），按当前固件实现编写
 
 ## 1. 概述
 
@@ -46,12 +46,12 @@
 ```text
 9_30/
 ├─ USE/
-│  ├─ measure.h/.c        测量核心：频率、ADC 采样与单频 DFT、H/Z/Y、标定
-│  ├─ screen.h/.c         串口屏 UART4 协议、错误码、b0/b1/b2 按键
+│  ├─ measure.h/.c        测量核心：频率、ADC 采样与单频 DFT、H/Z/Y、标定、应用层循环
+│  ├─ screen.h/.c         串口屏 UART4 协议、错误码、b0/b1/b2 按键、按键服务
 │  ├─ relay_range.h/.c    三路继电器反馈电阻（b1 单击切档）
 │  └─ uart_debug.h/.c     USART3 调试日志（TX-only、环形缓冲）
 ├─ Core/
-│  ├─ Src/main.c          初始化、自动选频、主循环
+│  ├─ Src/main.c          初始化、主循环（三个高层调用）
 │  ├─ Src/usart.c         UART4（屏幕）+ USART3（调试）
 │  ├─ Src/adc.c           ADC1/ADC2 双 ADC 同步配置
 │  ├─ Src/tim.c           TIM6，TRGO 触发 ADC
@@ -64,6 +64,11 @@
 ```
 
 `USE/` 是用户逻辑；CubeMX 重新生成时保留该目录。`relay_range` 和 `uart_debug` 已加入 Keil 的 `Application/User/USE` 组。
+
+**代码分层说明**：
+- `measure.c/h`：测量算法 + 应用层循环（Measure_Init, Measure_Service）
+- `screen.c/h`：按键处理 + 屏幕显示（Screen_KeyService, Screen_Poll）
+- `main.c`：只负责初始化和调用高层函数
 
 ## 4. 引脚与资源
 
@@ -90,24 +95,27 @@
 上电
   → HAL/时钟/GPIO/DMA/SPI1/UART4/USART3/ADC1/TIM6/ADC2
   → Screen_Init()            启动 UART4 接收（b0/b1/b2）
-  → Relay_Init()            上电闭合 K2（1.5 kΩ），等吸合
-  → CircuitID_Init()
-  → ADC_Sampler_Init()       校准 + 双 ADC 同步 + DMA + TIM6
   → UartDebug_Init()          调试口就绪，输出 banner
-  → FreqScan_Select()        五档频率打分
-  → 主循环
-       b0 单击 → 重扫；b1 单击 → 切档；b2 → 静默（见 §9）
-       f = Measure_GetFrequency()
-       Freq_SourceSet(f)               空实现，源在外部
-       ADC_Sampler_SetFrequency(f)     同频不重开；换频开新窗口
-       ADC_Sampler_GetWindow()         等窗口，超时 1500 ms
-       CircuitID_Compute()             算 H/Z/Y/G/B
-       Screen_SetResult() + UartDebug_LogMeasurement()
-       Screen_Poll()                   每 500 ms 刷新屏幕
+  → Measure_Init()           CircuitID → Relay → ADC → 首次扫描
+  → 主循环（每轮三个调用）
+       Screen_KeyService()   处理按键，设置请求标志
+       Measure_Service()     执行扫描或一次测量周期
+       Screen_Poll()         每 500 ms 刷新屏幕
 ```
 
-- 反馈电阻上电固定 1.5 kΩ；b1 单击可循环切档（1.5k → 15k → 150 → 1.5k），切档后 `CircuitID_SetFeedbackResistor()` 同步 `R_eff`、丢弃当前窗口并重开。
+**架构说明**：
+- `Screen_KeyService()`：处理 b0/b1/b2 按键，设置 Measure_RequestScan/NextRange
+- `Measure_Service()`：处理请求、执行扫描或测量周期（取频率、等窗口、计算、显示）
+- `Screen_Poll()`：刷新屏幕显示
+
+**按键行为**：
+- b0 单击 → 重扫频率（合并/去重，扫描期间多次按只触发一次）
+- b1 单击 → 切换继电器档位（1.5k → 15k → 150 → 循环）
+- b2 → 静默（预留）
+
+- 反馈电阻上电固定 1.5 kΩ；b1 单击可循环切档，切档后 `CircuitID_SetFeedbackResistor()` 同步 `R_eff`、丢弃当前窗口并重开。
 - 计算失败/超时会清结果，屏幕显示 `-`，不显示陈旧读数。
+- b1 在窗口等待期间可提前响应，扫描期间按 b1 立即退出扫描并切档，不闪 E04。
 
 ## 6. 测量原理
 
@@ -430,24 +438,38 @@ CubeMX 重新生成后检查：
 
 1. Keil 工程仍包含 `measure.c`、`screen.c`、`relay_range.c`、`uart_debug.c`，头文件路径含 `../USE`。
 2. `.ioc`：PE3/PE4/PE6 为 `GPIO_Output`（标签 `RELAY_K1/K2/K3`）；PB10 为 `USART3_TX`；UART4/USART3 均 921600；UART4/USART3 全局中断使能。
-3. `main.c` USER CODE 区仍调用 `Screen_Init()`、`Relay_Init()`、`CircuitID_Init()`、`ADC_Sampler_Init()`、`UartDebug_Init()`、`FreqScan_Select()`、`Screen_Poll()`、`UartDebug_LogMeasurement()`。
+3. `main.c` USER CODE 区：
+   - USER CODE BEGIN 2: `Screen_Init()`, `UartDebug_Init()`, `Measure_Init()`
+   - USER CODE BEGIN WHILE: `Screen_KeyService()`, `Measure_Service()`, `Screen_Poll()`
 4. `adc.c` 的 `ADC_DUALMODE_REGSIMULT`/`DualModeData`/`TwoSamplingDelay` 仍在 `USER CODE BEGIN ADC1_Init 2` 区；ADC1 的 DMA 为 Word 对齐。
 5. TIM6 的 PSC/ARR 与 `ADC_SAMPLER_RATE_HZ` 一致；SPI1 仍为主机但无设备。
 6. `relay_range.c`、`uart_debug.c` 在 `Application/User/USE` 组。
+
+**代码架构说明**：
+- `main.c` 只负责初始化和调用三个高层函数
+- 按键逻辑在 `screen.c` 的 `Screen_KeyService()`
+- 测量逻辑在 `measure.c` 的 `Measure_Service()`
+- 屏幕刷新在 `screen.c` 的 `Screen_Poll()`
 
 ## 17. 验证状态
 
 已通过：
 
-- ArmClang 编译 + 链接：**39 files, 0 errors**；Program Size：Code 51322、RO-data 2378、RW-data 28、ZI-data 4988。
+- ArmClang 编译 + 链接：**39 files, 0 errors, 0 warnings**；Program Size：Code 55722、RO-data 2378、RW-data 28、ZI-data 4924。
 - `.ioc` 与代码的引脚/实例一致性检查：PE3/PE4/PE6（`RELAY_K1/K2/K3`）、PB10/USART3、PC10/11/UART4。
 - 固件源码（`USE/`、`Core/`）静态检查：无 `analog_switch` / `Switch_*` / `SW_ENABLE` / `Screen_TakeRefreshKey` 残留。
+- **代码架构重构完成**：main.c 瘦身为三个高层调用，按键/测量/显示逻辑分层清晰。
+- **按键处理优化完成**：
+  - b0 合并/去重：扫描期间多次按 b0 只触发一次扫描
+  - b1 提前响应：窗口等待中检测到 b1 立即处理，扫描期间按 b1 立即退出并切档
+  - 修复中断被永久关闭的 bug：避免系统卡死
+  - 修复 b1 双重切档：B1 事件只被消费一次
 
 待上板：
 
 - USART3 921600 日志（T1）、与串口屏共存（T2）、速率/丢行（T3/T4）、中断影响（T5）、误码（T6）、回归（T7）。
 - 继电器上电默认（R1）：PE3/PE4/PE6 = 0 V / 3.3 V / 0 V（K1 断、K2 合、K3 断）；K2 触点通断约 1.5 kΩ（R2）。
-- 上电默认档 `R_eff = 1500 Ω`（R3）、1 kΩ 已知 DUT 的 |Y| ≈ 1 mS（R4）、30 s 观察无自动切档（R5）、断电/上电 10 次重复性（R6）。
+- 上电默认档 `R_eff = 1500 Ω`（R3）、1 kHz 已知 DUT 的 |Y| ≈ 1 mS（R4）、30 s 观察无自动切档（R5）、断电/上电 10 次重复性（R6）。
 - b0/b1/b2 按键协议（编号 B，与 USART3 的 T、继电器组的 R 区分）：B1 b0 单击 → 强制重扫，档位与 `f:` 不变；B2 b1 单击 → 切一档（1.5k→15k→150→1.5k 循环），`t10` 立即变 `R:15k`，`f:` 不变；B3 b2 → 无动作；B4 b0 连续两次（间隔 >100 ms）→ 两次重扫，档位不变；B5 b1 连续两次 → 连续切两档。待上板实测。
 
 ## 18. 实施记录
