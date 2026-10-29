@@ -209,6 +209,7 @@ void UartDebug_LogMeasurement(const FRF_Point_t *point,
 
 void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
 {
+#if (CIR_DUT_TOPOLOGY == 1u)
     /* 用 SPI 的 H 换算 Y，与 DFT 的 Y 比，输出一行差异（§6.3） */
     double h_re, h_im, y_re, y_im, y_mag, y_phase;
     double r = (double)CircuitID_GetFeedbackResistor();
@@ -226,10 +227,15 @@ void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
     y_phase = atan2(y_im, y_re) * 180.0 / 3.14159265358979323846;
 
     /* 计算偏差 */
-    double dft_y_mag = (double)dft->y_mag;
+    double dft_y_mag = (double)dft->y_mag_siemens;
     double dft_y_phase = (double)dft->y_phase_deg;
 
-    int32_t dY_permille = (int32_t)((y_mag - dft_y_mag) / dft_y_mag * 1000.0);
+    /* 除零保护 */
+    int32_t dY_permille = 0;
+    if (dft_y_mag > 1e-12)
+    {
+        dY_permille = (int32_t)((y_mag - dft_y_mag) / dft_y_mag * 1000.0);
+    }
     int32_t dP_mdeg = (int32_t)((y_phase - dft_y_phase) * 1000.0);
 
     /* 输出格式（全整数，符合现有 UartDebug_Printf 的支持范围） */
@@ -247,6 +253,7 @@ void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
                      (unsigned long)Spi_SlaveValidCount(),
                      (unsigned long)Spi_SlaveErrorCount(),
                      (unsigned long)Spi_SlaveOverrunCount());
+#endif /* CIR_DUT_TOPOLOGY == 1u */
 }
 
 uint16_t UartDebug_DropCount(void)
