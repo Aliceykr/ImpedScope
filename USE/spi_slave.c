@@ -2,6 +2,47 @@
 #include "spi.h"
 #include "uart_debug.h"
 
+#if (SPI_SLAVE_ENABLE == 0u)
+
+/* ==========================================================================
+ * 关闭时：只提供空实现，measure.c / uart_debug.c 不需要任何条件编译
+ * ========================================================================== */
+
+void Spi_SlaveInit(void)
+{
+    /* 不启动 DMA */
+}
+
+uint8_t Spi_SlavePoll(Spi_Frame_t *out)
+{
+    (void)out;
+    return 0u;                  /* 永远没有新帧 */
+}
+
+uint8_t Spi_SlaveIsAlive(void)
+{
+    /* 关闭时视为"链路正常"，否则 measure.c 会每个周期都报 E21。
+     * 语义上不是"活着"，而是"不要因为没接 FPGA 就报错"。 */
+    return 1u;
+}
+
+uint32_t Spi_SlaveValidCount(void)
+{
+    return 0u;
+}
+
+uint32_t Spi_SlaveErrorCount(void)
+{
+    return 0u;
+}
+
+uint32_t Spi_SlaveOverrunCount(void)
+{
+    return 0u;
+}
+
+#else   /* SPI_SLAVE_ENABLE != 0 */
+
 /* ==========================================================================
  * 内部状态（§5.2）
  * ========================================================================== */
@@ -521,3 +562,5 @@ uint32_t Spi_SlaveOverrunCount(void)
 {
     return s_overrun_count;
 }
+
+#endif /* SPI_SLAVE_ENABLE */

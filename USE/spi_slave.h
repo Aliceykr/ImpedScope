@@ -11,6 +11,13 @@ extern "C" {
  * SPI 从机接收 FPGA 数据驱动
  * ========================================================================== */
 
+/* 模块总开关。
+ *   1 = 正常接收 FPGA 帧并与 DFT 比对（默认）
+ *   0 = 整个模块编译成空实现：不启动 DMA、不解析、不打印，
+ *       Spi_SlavePoll() 恒返回 0，Spi_SlaveIsAlive() 恒返回 1（不报 E21）。
+ * 没接 FPGA / 不想看到 E21 时改成 0 即可，measure.c 和 uart_debug.c 无需改动。 */
+#define SPI_SLAVE_ENABLE            1u
+
 /* 帧格式常量（与 PLAN-SPI从机与双路并行.md §4 保持一致） */
 #define SPI_SLAVE_FRAME_WORDS       10u    /* 每帧 16 位字数 */
 #define SPI_SLAVE_FRAME_SLOTS       4u     /* DMA 循环缓冲能放几帧 */
