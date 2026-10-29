@@ -313,11 +313,14 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
     __disable_irq();
     uint16_t err_flags = s_err_flags;
     uint8_t new_frame = s_new_frame_flag;
+    s_new_frame_flag = 0u;  /* 在读数据的同一临界区里清标志，避免丢帧 */
+#if SPI_SLAVE_DEBUG_LEVEL >= 2
     uint16_t new_seq = s_new_frame_seq;
     uint16_t new_fl = s_new_frame_fl;
     uint32_t new_freq = s_new_frame_freq;
     uint32_t new_mag = s_new_frame_mag;
     int32_t  new_phi = s_new_frame_phi;
+#endif
     uint8_t raw_ready = s_raw_ready;
     uint16_t raw_snapshot[SPI_SLAVE_FRAME_WORDS];
     for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
@@ -440,12 +443,6 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
             }
         }
 #endif
-
-        /* 清 new_frame_flag（在临界区外清，因为数据已经拷贝到局部变量） */
-        primask = __get_PRIMASK();
-        __disable_irq();
-        s_new_frame_flag = 0u;
-        __set_PRIMASK(primask);
     }
 
     /* 每秒统计（§13.3） */
