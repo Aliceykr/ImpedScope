@@ -9,7 +9,22 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_ROOT="${SRC_ROOT:-$ROOT}"
 OUT="${1:-/tmp/930build}"
-TOOL="E:/Keil_v5/ARM/ARMCLANG/bin"
+
+# 工具链路径：优先用 KEIL_ARMCLANG_BIN 环境变量，否则按常见安装位置自动挑选。
+# 每台机器的 Keil 安装目录不同，硬编码单一路径会让另一台机器直接编不动。
+if [ -n "${KEIL_ARMCLANG_BIN:-}" ]; then
+  TOOL="$KEIL_ARMCLANG_BIN"
+else
+  TOOL=""
+  for cand in "E:/Keil_v5/ARM/ARMCLANG/bin" "D:/KEIL/CORE/ARM/ARMCLANG/bin" "C:/Keil_v5/ARM/ARMCLANG/bin"; do
+    if [ -x "$cand/armclang.exe" ]; then TOOL="$cand"; break; fi
+  done
+  if [ -z "$TOOL" ]; then
+    echo "*** 找不到 armclang.exe，请设置 KEIL_ARMCLANG_BIN 指向 .../ARM/ARMCLANG/bin" >&2
+    exit 1
+  fi
+fi
+echo "[tool] $TOOL"
 
 CPU_FLAGS="-mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard"
 DEFINES="-DUSE_PWR_LDO_SUPPLY -DUSE_HAL_DRIVER -DSTM32H750xx"
