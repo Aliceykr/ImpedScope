@@ -57,13 +57,10 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-
-/* 三路继电器控制脚（与 9_30.ioc 的 GPIO_Label=RELAY_K1/K2/K3 对应）。
- * 由 CubeMX 重新生成时保持同名同值，勿改标签。 */
-#define RELAY_K1_Pin GPIO_PIN_3
-#define RELAY_K1_GPIO_Port GPIOE
 #define RELAY_K2_Pin GPIO_PIN_4
 #define RELAY_K2_GPIO_Port GPIOE
+#define RELAY_K1_Pin GPIO_PIN_3
+#define RELAY_K1_GPIO_Port GPIOE
 #define RELAY_K3_Pin GPIO_PIN_6
 #define RELAY_K3_GPIO_Port GPIOE
 

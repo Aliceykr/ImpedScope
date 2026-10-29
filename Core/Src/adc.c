@@ -68,8 +68,6 @@ void MX_ADC1_Init(void)
   }
 
   /** Configure the ADC multi-mode
-  *  CubeMX 生成的默认值:独立模式。本工程实际使用双 ADC 同步模式,真正的配置
-  *  放在下方 USER CODE BEGIN ADC1_Init 2 区并在此区内重新断言一次,原因见该区。
   */
   multimode.Mode = ADC_MODE_INDEPENDENT;
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
@@ -136,10 +134,6 @@ void MX_ADC2_Init(void)
   /* USER CODE END ADC2_Init 1 */
 
   /** Common config
-  *  ADC2 是双 ADC 同步模式的从 ADC:触发沿由主 ADC 内部带过来（HAL 只用主 ADC 的
-  *  句柄启动同步转换,不会单独启动 ADC2）,结果写进 CDR 的高半字。下面这些
-  *  ExternalTrigConv / ConversionDataManagement 在同步模式下不参与工作,保留是为了
-  *  与 .ioc 一致、以及切回独立模式时立刻可用。
   */
   hadc2.Instance = ADC2;
   hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV2;
@@ -210,8 +204,6 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     hdma_adc1.Init.Direction = DMA_PERIPH_TO_MEMORY;
     hdma_adc1.Init.PeriphInc = DMA_PINC_DISABLE;
     hdma_adc1.Init.MemInc = DMA_MINC_ENABLE;
-    /* 双 ADC 同步模式读的是 32 位公共数据寄存器 CDR（低半字 ADC1、高半字 ADC2）,
-     * 所以外设侧和存储侧都必须是"字"对齐。用半字会把高半字（ADC2 的 Uo）丢掉。 */
     hdma_adc1.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
     hdma_adc1.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
     hdma_adc1.Init.Mode = DMA_CIRCULAR;
@@ -256,9 +248,6 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
 
     /* ADC2 DMA Init */
     /* ADC2 Init */
-    /* 同步模式下 ADC2 的转换结果随 ADC1 一起打包在 CDR 里、由 ADC1 的 DMA 搬走,
-     * 所以这条 DMA 运行期不会启动。保留它是为了 .ioc 与 adc.c 保持一致（重新生成时
-     * 不被改乱）,以及将来切回独立模式时可以立即启用。 */
     hdma_adc2.Instance = DMA1_Stream1;
     hdma_adc2.Init.Request = DMA_REQUEST_ADC2;
     hdma_adc2.Init.Direction = DMA_PERIPH_TO_MEMORY;

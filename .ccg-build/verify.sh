@@ -18,8 +18,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=39
-# 基准取自非阻塞状态机版本的实际编译结果（Measure_Service 状态机改造后）。
-EXPECT_CODE=54514
+# 基准取自当前版本：非阻塞状态机 + SPI1 从机/DMA + USART3 恢复。
+EXPECT_CODE=55474
 CODE_TOL=400
 fail=0
 
@@ -75,7 +75,17 @@ has Core/Src/stm32h7xx_it.c "DMA1_Stream2_IRQHandler"          "DMA1 Stream2 中
 has Core/Inc/main.h "RELAY_K1_Pin"                             "K1 引脚宏（main.h）"
 has Core/Inc/main.h "RELAY_K2_Pin"                             "K2 引脚宏（main.h）"
 has Core/Inc/main.h "RELAY_K3_Pin"                             "K3 引脚宏（main.h）"
-has Core/Src/gpio.c "RELAY_K1_Pin|RELAY_K2_Pin|RELAY_K3_Pin"   "三个继电器脚被统一配置"
+has Core/Src/gpio.c "RELAY_K1_Pin"                             "K1 脚已配置（gpio.c）"
+has Core/Src/gpio.c "RELAY_K2_Pin"                             "K2 脚已配置（gpio.c）"
+has Core/Src/gpio.c "RELAY_K3_Pin"                             "K3 脚已配置（gpio.c）"
+# SPI1 从机 + DMA（FPGA 为主机）
+has Core/Src/spi.c "SPI_MODE_SLAVE"                            "SPI1 从机模式"
+has Core/Src/spi.c "SPI_NSS_HARD_INPUT"                        "SPI1 硬件 NSS 输入"
+has Core/Src/spi.c "hdma_spi1_rx"                              "SPI1 RX DMA 句柄"
+has Core/Src/spi.c "DMA_REQUEST_SPI1_RX"                       "SPI1 RX DMA 请求"
+has 9_30.ioc "Dma.SPI1_RX"                                     ".ioc 里有 SPI1_RX DMA"
+has 9_30.ioc "USART3.BaudRate=921600"                          ".ioc 里 USART3 仍在"
+has Core/Src/usart.c "MX_USART3_UART_Init"                     "USART3 初始化函数仍在"
 # 初始化与按键服务在重构后位于 measure.c / screen.c（main.c 只剩三个高层调用）
 has Core/Src/main.c "Measure_Service();"                       "主循环调用 Measure_Service()"
 has Core/Src/main.c "Screen_KeyService();"                     "主循环调用 Screen_KeyService()"

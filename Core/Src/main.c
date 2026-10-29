@@ -105,10 +105,10 @@ int main(void)
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_UART4_Init();
-  MX_USART3_UART_Init();
   MX_ADC1_Init();
   MX_TIM6_Init();
   MX_ADC2_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   Screen_Init();                       /* 同时启动 b0(freq_change) 按键接收 */
   Screen_SetStage("PERIPH");
@@ -130,9 +130,9 @@ int main(void)
     Measure_Service();     /* 执行扫描或一次测量周期 */
     Screen_Poll();         /* 刷新屏幕 */
   }
-  /* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
-  /* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
 }
 
@@ -285,4 +285,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-
