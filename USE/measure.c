@@ -1422,6 +1422,15 @@ void Measure_Service(void)
 
         case MEASURE_STATE_SWEEPING:
         {
+            /* 扫描期间按 b1：立刻中止扫描，回到 IDLE 处理切档。
+             * 扫描的中间状态由下一次扫描的入口统一重置（见 IDLE 的 s_sweep_* 清零）。 */
+            if (s_range_request != 0u)
+            {
+                Screen_SetStage("LOOP");
+                s_state = MEASURE_STATE_IDLE;
+                return;
+            }
+
             uint8_t result = FreqScanStep();
 
             if (result == 1u)  /* 完成 */
@@ -1475,6 +1484,15 @@ void Measure_Service(void)
 
         case MEASURE_STATE_MEASURING:
         {
+            /* 切档请求优先于本次测量：立刻退出，回到 IDLE 让既有分支处理。
+             * 必须在取窗口之前退出，否则要等满一个 DFT 窗口（100 Hz 下 1 s）。 */
+            if (s_range_request != 0u)
+            {
+                s_window_ready = 0u;     /* 丢弃待处理窗口，切档后会 Restart */
+                s_state = MEASURE_STATE_IDLE;
+                return;
+            }
+
             /* 检查 B1/B2 按键 */
             Screen_KeyEvent_t key = Screen_PeekKey();
             if (key == SCREEN_KEY_B1)
