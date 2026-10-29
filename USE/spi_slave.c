@@ -28,22 +28,33 @@ static volatile uint16_t s_last_valid_seq_snapshot;
  * 中断上下文事件（避免在中断里打印，§11.8）
  * ========================================================================== */
 
-/* 事件类型 */
-enum {
-    SPI_EVT_NONE = 0,
-    SPI_EVT_HEAD_ERR,
-    SPI_EVT_CRC_ERR,
-    SPI_EVT_NVALID,
-    SPI_EVT_OVR,
-    SPI_EVT_RESYNC,
-    SPI_EVT_NEW_FRAME
-};
+/* 错误事件标志（位掩码，各自独立，不会被新帧覆盖） */
+#define SPI_ERR_HEAD    (1u << 0)
+#define SPI_ERR_CRC     (1u << 1)
+#define SPI_ERR_NVALID  (1u << 2)
+#define SPI_ERR_OVR     (1u << 3)
 
-/* 事件队列（简单覆盖式，只保留最新的） */
-static volatile uint8_t  s_evt_type;
-static volatile uint16_t s_evt_data0;
-static volatile uint16_t s_evt_data1;
-static volatile uint32_t s_evt_data2;
+static volatile uint16_t s_err_flags;       /* 错误标志位掩码 */
+static volatile uint16_t s_err_head_w0;     /* head 错误数据 */
+static volatile uint16_t s_err_head_slot;
+static volatile uint16_t s_err_crc_seq;     /* crc 错误数据 */
+static volatile uint16_t s_err_crc_got;
+static volatile uint16_t s_err_crc_exp;
+static volatile uint16_t s_err_nvalid_seq;  /* nvalid 错误数据 */
+static volatile uint16_t s_err_nvalid_fl;
+static volatile uint16_t s_err_ovr_n;       /* ovr 错误数据 */
+
+/* 新帧标志（独立于错误标志，不会互相覆盖） */
+static volatile uint8_t  s_new_frame_flag;
+static volatile uint16_t s_new_frame_seq;
+static volatile uint16_t s_new_frame_fl;
+static volatile uint32_t s_new_frame_freq;
+static volatile uint32_t s_new_frame_mag;
+static volatile int32_t  s_new_frame_phi;
+
+/* SPIRAW 快照（10 个字，20 字节） */
+static volatile uint16_t s_raw_snapshot[SPI_SLAVE_FRAME_WORDS];
+static volatile uint8_t  s_raw_ready;
 
 /* ==========================================================================
  * 调试输出状态（§13.4）
@@ -51,7 +62,7 @@ static volatile uint32_t s_evt_data2;
 
 #if SPI_SLAVE_DEBUG_LEVEL >= 1
 static uint32_t s_stat_last_tick;
-static uint32_t s_err_last_tick[5];        /* 各类错误上次打印时刻 */
+static uint32_t s_err_last_tick[4];        /* 各类错误上次打印时刻 */
 static uint32_t s_last_alive_print_tick;
 static uint8_t  s_alive_was_dead;
 #endif
@@ -130,10 +141,10 @@ static uint8_t Spi_SlaveParseSlot(const uint16_t *w)
         s_error_count++;
         s_consecutive_fail++;
 
-        /* 记录事件（中断里只存，不打印） */
-        s_evt_type = SPI_EVT_HEAD_ERR;
-        s_evt_data0 = w[0];
-        s_evt_data1 = (uint16_t)s_consecutive_fail;
+        /* 记录 head 错误（独立槽位，不会被新帧覆盖） */
+        s_err_flags |= SPI_ERR_HEAD;
+        s_err_head_w0 = w[0];
+        s_err_head_slot = (uint16_t)s_consecutive_fail;
         return 0u;
     }
 
@@ -145,11 +156,11 @@ static uint8_t Spi_SlaveParseSlot(const uint16_t *w)
         s_error_count++;
         s_consecutive_fail++;
 
-        /* 记录事件（中断里只存，不打印） */
-        s_evt_type = SPI_EVT_CRC_ERR;
-        s_evt_data0 = w[1];
-        s_evt_data1 = w[9];
-        s_evt_data2 = crc_calc;
+        /* 记录 crc 错误（独立槽位） */
+        s_err_flags |= SPI_ERR_CRC;
+        s_err_crc_seq = w[1];
+        s_err_crc_got = w[9];
+        s_err_crc_exp = crc_calc;
         return 0u;
     }
 
@@ -176,21 +187,30 @@ static uint8_t Spi_SlaveParseSlot(const uint16_t *w)
         s_have_new = 1u;
         result = 1u;
 
-        /* 记录新帧事件（主循环里会打印 SPIRX/SPIRAW） */
-        s_evt_type = SPI_EVT_NEW_FRAME;
-        s_evt_data0 = s_latest.seq;
-        s_evt_data1 = s_latest.flags;
-        s_evt_data2 = mag_val;
+        /* 记录新帧事件（所有数据放进事件槽位，避免与 s_latest 不同步） */
+        s_new_frame_flag = 1u;
+        s_new_frame_seq = s_latest.seq;
+        s_new_frame_fl = s_latest.flags;
+        s_new_frame_freq = s_latest.frequency_hz;
+        s_new_frame_mag = mag_val;
+        s_new_frame_phi = phi_val;
+
+        /* 保存原始字（供 SPIRAW 使用） */
+        for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
+        {
+            s_raw_snapshot[i] = w[i];
+        }
+        s_raw_ready = 1u;
     }
     else
     {
         /* 只更新存活时间戳，不更新数值 */
         s_last_valid_tick = s_latest.tick;
 
-        /* 记录事件（中断里只存，不打印） */
-        s_evt_type = SPI_EVT_NVALID;
-        s_evt_data0 = s_latest.seq;
-        s_evt_data1 = s_latest.flags;
+        /* 记录 nvalid 错误（独立槽位） */
+        s_err_flags |= SPI_ERR_NVALID;
+        s_err_nvalid_seq = s_latest.seq;
+        s_err_nvalid_fl = s_latest.flags;
     }
 
     return result;
@@ -232,9 +252,9 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
     {
         s_overrun_count++;
 
-        /* 记录事件（中断里只存，不打印） */
-        s_evt_type = SPI_EVT_OVR;
-        s_evt_data0 = (uint16_t)s_overrun_count;
+        /* 记录 ovr 错误（独立槽位） */
+        s_err_flags |= SPI_ERR_OVR;
+        s_err_ovr_n = (uint16_t)s_overrun_count;
 
         /* 从机在 OVR/MODF 后会停，尝试重新启动 DMA */
         (void)HAL_SPI_Receive_DMA(hspi, (uint8_t *)s_dma_buf,
@@ -248,8 +268,6 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 
 void Spi_SlaveInit(void)
 {
-    uint32_t primask;
-
 #if SPI_SLAVE_DEBUG_LEVEL >= 1
     UartDebug_Printf("SPIINIT mode=slave w=%u crc=ccitt lvl=%u\r\n",
                      SPI_SLAVE_FRAME_WORDS, SPI_SLAVE_DEBUG_LEVEL);
@@ -290,96 +308,99 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
 #if SPI_SLAVE_DEBUG_LEVEL >= 1
     uint32_t now = HAL_GetTick();
 
-    /* 处理中断里记录的事件（在主循环上下文打印，§11.8） */
-    uint8_t evt_type = s_evt_type;
-    if (evt_type != SPI_EVT_NONE)
+    /* 处理中断里记录的错误事件（在临界区里读+清标志，避免竞态） */
+    primask = __get_PRIMASK();
+    __disable_irq();
+    uint16_t err_flags = s_err_flags;
+    s_err_flags = 0u;
+    uint8_t new_frame = s_new_frame_flag;
+    s_new_frame_flag = 0u;
+    uint8_t raw_ready = s_raw_ready;
+    s_raw_ready = 0u;
+    __set_PRIMASK(primask);
+
+    /* 打印错误（各自独立，不会互相覆盖） */
+    if ((err_flags & SPI_ERR_HEAD) != 0u)
     {
-        s_evt_type = SPI_EVT_NONE;
-
-        switch (evt_type)
+        /* SPIERR head w0=XXXX slot=N（§13.3） */
+        if ((now - s_err_last_tick[0]) >= SPI_SLAVE_ERR_PERIOD_MS)
         {
-            case SPI_EVT_HEAD_ERR:
-                /* SPIERR head w0=XXXX slot=N（§13.3） */
-                if ((now - s_err_last_tick[0]) >= SPI_SLAVE_ERR_PERIOD_MS)
-                {
-                    s_err_last_tick[0] = now;
-                    UartDebug_Printf("SPIERR head w0=%04X slot=%u\r\n",
-                                     s_evt_data0, s_evt_data1);
-                }
-                break;
+            s_err_last_tick[0] = now;
+            UartDebug_Printf("SPIERR head w0=%04X slot=%u\r\n",
+                             s_err_head_w0, s_err_head_slot);
+        }
+    }
 
-            case SPI_EVT_CRC_ERR:
-                /* SPIERR crc seq=XXX got=XXXX exp=XXXX（§13.3） */
-                if ((now - s_err_last_tick[1]) >= SPI_SLAVE_ERR_PERIOD_MS)
-                {
-                    s_err_last_tick[1] = now;
-                    UartDebug_Printf("SPIERR crc seq=%u got=%04X exp=%04X\r\n",
-                                     s_evt_data0, s_evt_data1, s_evt_data2);
-                }
-                break;
+    if ((err_flags & SPI_ERR_CRC) != 0u)
+    {
+        /* SPIERR crc seq=XXX got=XXXX exp=XXXX（§13.3） */
+        if ((now - s_err_last_tick[1]) >= SPI_SLAVE_ERR_PERIOD_MS)
+        {
+            s_err_last_tick[1] = now;
+            UartDebug_Printf("SPIERR crc seq=%u got=%04X exp=%04X\r\n",
+                             s_err_crc_seq, s_err_crc_got, s_err_crc_exp);
+        }
+    }
 
-            case SPI_EVT_NVALID:
-                /* SPIERR nvalid seq=XXX fl=X（§13.3） */
-                if ((now - s_err_last_tick[2]) >= SPI_SLAVE_ERR_PERIOD_MS)
-                {
-                    s_err_last_tick[2] = now;
-                    UartDebug_Printf("SPIERR nvalid seq=%u fl=%u\r\n",
-                                     s_evt_data0, s_evt_data1);
-                }
-                break;
+    if ((err_flags & SPI_ERR_NVALID) != 0u)
+    {
+        /* SPIERR nvalid seq=XXX fl=X（§13.3） */
+        if ((now - s_err_last_tick[2]) >= SPI_SLAVE_ERR_PERIOD_MS)
+        {
+            s_err_last_tick[2] = now;
+            UartDebug_Printf("SPIERR nvalid seq=%u fl=%u\r\n",
+                             s_err_nvalid_seq, s_err_nvalid_fl);
+        }
+    }
 
-            case SPI_EVT_OVR:
-                /* SPIERR ovr n=X（§13.3） */
-                if ((now - s_err_last_tick[3]) >= SPI_SLAVE_ERR_PERIOD_MS)
-                {
-                    s_err_last_tick[3] = now;
-                    UartDebug_Printf("SPIERR ovr n=%u\r\n", s_evt_data0);
-                }
-                break;
+    if ((err_flags & SPI_ERR_OVR) != 0u)
+    {
+        /* SPIERR ovr n=X（§13.3） */
+        if ((now - s_err_last_tick[3]) >= SPI_SLAVE_ERR_PERIOD_MS)
+        {
+            s_err_last_tick[3] = now;
+            UartDebug_Printf("SPIERR ovr n=%u\r\n", s_err_ovr_n);
+        }
+    }
 
-            case SPI_EVT_NEW_FRAME:
+    /* 打印新帧（SPIRX/SPIRAW，所有数据来自同一帧，不会不同步） */
+    if (new_frame != 0u)
+    {
 #if SPI_SLAVE_DEBUG_LEVEL >= 2
-                /* SPIRX seq=XXX fl=X f=XXXX mag=XXXXXXXXX phi=XXXX（§13.3） */
-                if ((now - s_rx_last_print_tick) >= SPI_SLAVE_DEBUG_RX_PERIOD_MS)
-                {
-                    if (s_rx_frames_printed < SPI_SLAVE_DEBUG_FRAMES)
-                    {
-                        s_rx_last_print_tick = now;
-                        s_rx_frames_printed++;
-                        UartDebug_Printf("SPIRX seq=%u fl=%u f=%lu mag=%lu phi=%ld\r\n",
-                                         s_evt_data0, s_evt_data1,
-                                         (unsigned long)s_latest.frequency_hz,
-                                         (unsigned long)s_evt_data2,
-                                         (long)(s_latest.h_phase_deg * 1000.0));
-                    }
-                }
+        /* SPIRX seq=XXX fl=X f=XXXX mag=XXXXXXXXX phi=XXXX（§13.3） */
+        if ((now - s_rx_last_print_tick) >= SPI_SLAVE_DEBUG_RX_PERIOD_MS)
+        {
+            if (s_rx_frames_printed < SPI_SLAVE_DEBUG_FRAMES)
+            {
+                s_rx_last_print_tick = now;
+                s_rx_frames_printed++;
+                UartDebug_Printf("SPIRX seq=%u fl=%u f=%lu mag=%lu phi=%ld\r\n",
+                                 s_new_frame_seq, s_new_frame_fl,
+                                 (unsigned long)s_new_frame_freq,
+                                 (unsigned long)s_new_frame_mag,
+                                 (long)s_new_frame_phi);
+            }
+        }
 #endif
 
 #if SPI_SLAVE_DEBUG_LEVEL >= 3
-                /* SPIRAW seq=XXX A55A XXXX ...（§13.3）
-                 * 需要重新找到这一帧的原始数据 —— 简化处理：只打印最新帧 */
-                if ((now - s_raw_last_print_tick) >= SPI_SLAVE_DEBUG_RAW_PERIOD_MS)
+        /* SPIRAW seq=XXX A55A XXXX ...（§13.3）
+         * 打印完整的 10 个原始字，用于逐字对拍 */
+        if ((now - s_raw_last_print_tick) >= SPI_SLAVE_DEBUG_RAW_PERIOD_MS)
+        {
+            if (s_raw_frames_printed < SPI_SLAVE_DEBUG_RAW_FRAMES)
+            {
+                s_raw_last_print_tick = now;
+                s_raw_frames_printed++;
+                UartDebug_Printf("SPIRAW seq=%u", s_new_frame_seq);
+                for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
                 {
-                    if (s_raw_frames_printed < SPI_SLAVE_DEBUG_RAW_FRAMES)
-                    {
-                        s_raw_last_print_tick = now;
-                        s_raw_frames_printed++;
-                        /* 这里简化处理：找到 s_latest.seq 对应的帧 */
-                        /* 实际实现需要更复杂的帧追踪 */
-                        UartDebug_Printf("SPIRAW seq=%u\r\n", s_evt_data0);
-                    }
+                    UartDebug_Printf(" %04X", s_raw_snapshot[i]);
                 }
-#endif
-                break;
-
-            case SPI_EVT_RESYNC:
-                /* SPIERR resync fail=X（§13.3） */
-                UartDebug_Printf("SPIERR resync fail=%u\r\n", s_evt_data0);
-                break;
-
-            default:
-                break;
+                UartDebug_Printf("\r\n");
+            }
         }
+#endif
     }
 
     /* 每秒统计（§13.3） */
@@ -397,7 +418,7 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
                          ok, err, ovr, drop, s_valid_seq, gap);
     }
 
-    /* 链路存活检测（不在调试宏里，量产也需要，§11.8） */
+    /* 链路存活检测（打印部分在调试宏里，检测逻辑本身不在） */
     uint32_t age = now - s_last_valid_tick;
     if (age >= SPI_SLAVE_ALIVE_MS)
     {
@@ -405,7 +426,6 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
         if (s_alive_was_dead == 0u)
         {
             s_alive_was_dead = 1u;
-            /* 每秒 1 条 SPIERR alive age=X（§13.3） */
         }
         if ((now - s_last_alive_print_tick) >= SPI_SLAVE_STAT_PERIOD_MS)
         {

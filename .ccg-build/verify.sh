@@ -19,7 +19,7 @@ OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=40
 # 基准取自当前版本：非阻塞状态机 + SPI1 从机/DMA + USART3 恢复 + SPI 从机驱动。
-EXPECT_CODE=58000
+EXPECT_CODE=58514
 CODE_TOL=500
 fail=0
 

@@ -214,6 +214,12 @@ void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
     double h_re, h_im, y_re, y_im, y_mag, y_phase;
     double r = (double)CircuitID_GetFeedbackResistor();
 
+    /* 除零保护：r 可能为 0 */
+    if (r <= 1e-12)
+    {
+        return;
+    }
+
     /* H_spi = mag * exp(j*phi) */
     h_re = (double)spi->h_mag * cos(spi->h_phase_deg * 3.14159265358979323846 / 180.0);
     h_im = (double)spi->h_mag * sin(spi->h_phase_deg * 3.14159265358979323846 / 180.0);
