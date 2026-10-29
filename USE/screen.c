@@ -89,11 +89,11 @@ static volatile uint8_t s_b0_pending;
  * 这样 b1/b2 绝不会复位 beat，b0 的反馈也更及时。 */
 static volatile uint8_t s_beat_reset_pending;
 
-/* 自动扫描的五个候选频率,仅用于校验/记录当前测量频率。 */
-#define SCREEN_FREQ_COUNT 5u
+/* 自动扫描的候选频率,仅用于校验/记录当前测量频率。 */
+#define SCREEN_FREQ_COUNT 2u
 static const uint32_t s_freq_hz[SCREEN_FREQ_COUNT] =
 {
-    100u, 300u, 1000u, 3000u, 10000u
+    1000u, 10000u
 };
 static uint32_t s_active_freq_hz;          /* 当前真正在测量的频率 */
 

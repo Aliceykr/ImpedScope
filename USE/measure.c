@@ -931,7 +931,9 @@ static ADC_Window_t s_cached_window;
 static uint8_t s_window_ready;
 
 /* SWEEPING 状态的缓存 */
-static const uint32_t s_sweep_candidates[] = { 1000u, 10000u, 3000u, 300u, 100u };
+/* 外部源只输出这两个频率；多余候选只会拉长扫描（100 Hz 单窗口就要 1 s），
+ * 3 kHz 还可能与 1 kHz 的 3 次谐波混淆。 */
+static const uint32_t s_sweep_candidates[] = { 1000u, 10000u };
 static uint8_t s_sweep_index;              /* 当前候选索引 */
 static uint8_t s_sweep_stage;              /* 0=设置频率, 1=等待窗口, 2=评估, 3=完成 */
 static uint32_t s_sweep_candidate;         /* 当前候选频率 */
@@ -941,6 +943,9 @@ static double s_sweep_best_score;
 static uint8_t s_sweep_got;                /* 当前候选是否拿到窗口 */
 static ADC_Window_t s_sweep_window;
 static uint8_t s_sweep_aborted;            /* B1 中止标志 */
+
+/* 扫描被切档打断：切档完成后自动补扫一次（见 SWEEPING / SWITCHING 分支）。 */
+static uint8_t s_rescan_after_switch;
 
 /* 请求函数（由 screen.c 调用） */
 void Measure_RequestScan(void)
@@ -1248,6 +1253,7 @@ void Measure_Init(void)
   s_sweep_index = 0u;
   s_sweep_stage = 0;
   s_sweep_aborted = 0u;
+  s_rescan_after_switch = 0u;
   s_sweep_best_f = 0u;
   s_sweep_best_score = 0.0;
   memset(&s_cached_window, 0, sizeof(s_cached_window));
@@ -1426,6 +1432,7 @@ void Measure_Service(void)
              * 扫描的中间状态由下一次扫描的入口统一重置（见 IDLE 的 s_sweep_* 清零）。 */
             if (s_range_request != 0u)
             {
+                s_rescan_after_switch = 1u;   /* 切完档回来补扫 */
                 Screen_SetStage("LOOP");
                 s_state = MEASURE_STATE_IDLE;
                 return;
@@ -1477,7 +1484,25 @@ void Measure_Service(void)
                 Screen_FlushRange();
                 (void)ADC_Sampler_Restart();
                 UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
-                s_state = MEASURE_STATE_IDLE;
+
+                if (s_rescan_after_switch != 0u)
+                {
+                    /* 扫描被本次切档打断：补扫一次，避免用旧频率继续测 */
+                    s_rescan_after_switch = 0u;
+                    s_scan_request = 0u;     /* 避免扫描结束后又因残留请求再扫一遍 */
+                    s_sweep_aborted = 0u;
+                    s_sweep_index = 0u;
+                    s_sweep_stage = 0;
+                    s_sweep_best_f = 0u;
+                    s_sweep_best_score = 0.0;
+                    Screen_SetStage("SCAN");
+                    Screen_ClearResult();
+                    s_state = MEASURE_STATE_SWEEPING;
+                }
+                else
+                {
+                    s_state = MEASURE_STATE_IDLE;
+                }
             }
             return;
         }
