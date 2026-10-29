@@ -207,6 +207,53 @@ void UartDebug_LogMeasurement(const FRF_Point_t *point,
 #endif
 }
 
+void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
+{
+    /* 用 SPI 的 H 换算 Y，与 DFT 的 Y 比，输出一行差异（§6.3） */
+    double h_re, h_im, y_re, y_im, y_mag, y_phase;
+    double r = (double)CircuitID_GetFeedbackResistor();
+
+    /* H_spi = mag * exp(j*phi) */
+    h_re = (double)spi->h_mag * cos(spi->h_phase_deg * 3.14159265358979323846 / 180.0);
+    h_im = (double)spi->h_mag * sin(spi->h_phase_deg * 3.14159265358979323846 / 180.0);
+
+    /* Y_spi = -H_spi / R */
+    y_re = -h_re / r;
+    y_im = -h_im / r;
+
+    /* 转换为极坐标 */
+    y_mag = sqrt(y_re * y_re + y_im * y_im);
+    y_phase = atan2(y_im, y_re) * 180.0 / 3.14159265358979323846;
+
+    /* 计算偏差 */
+    double dft_y_mag = (double)dft->y_mag;
+    double dft_y_phase = (double)dft->y_phase_deg;
+
+    int32_t dY_permille = (int32_t)((y_mag - dft_y_mag) / dft_y_mag * 1000.0);
+    int32_t dP_mdeg = (int32_t)((y_phase - dft_y_phase) * 1000.0);
+
+    /* 输出格式（全整数，符合现有 UartDebug_Printf 的支持范围） */
+    UartDebug_Printf("SPI f=%lu,seq=%u,magH_u=%lu,PHI_mdeg=%ld,Y_uS=%lu,P_mdeg=%ld,",
+                     (unsigned long)spi->frequency_hz,
+                     (unsigned)spi->seq,
+                     (unsigned long)(spi->h_mag * 1e6),
+                     (long)(spi->h_phase_deg * 1000.0),
+                     (unsigned long)(y_mag * 1e6),
+                     (long)(y_phase * 1000.0));
+
+    UartDebug_Printf("dY_permille=%ld,dP_mdeg=%ld,ok=%lu,err=%lu,ovr=%lu\r\n",
+                     (long)dY_permille,
+                     (long)dP_mdeg,
+                     (unsigned long)Spi_SlaveValidCount(),
+                     (unsigned long)Spi_SlaveErrorCount(),
+                     (unsigned long)Spi_SlaveOverrunCount());
+}
+
+uint16_t UartDebug_DropCount(void)
+{
+    return s_drop_count;
+}
+
 void UartDebug_OnError(void)
 {
     s_tx_busy = 0u;
@@ -256,6 +303,17 @@ void UartDebug_LogMeasurement(const FRF_Point_t *point,
 void UartDebug_LogEvent(const char *event)
 {
     (void)event;
+}
+
+void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
+{
+    (void)dft;
+    (void)spi;
+}
+
+uint16_t UartDebug_DropCount(void)
+{
+    return 0u;
 }
 
 void UartDebug_OnError(void)

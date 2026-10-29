@@ -17,10 +17,10 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
-EXPECT_FILES=39
-# 基准取自当前版本：非阻塞状态机 + SPI1 从机/DMA + USART3 恢复。
-EXPECT_CODE=55474
-CODE_TOL=400
+EXPECT_FILES=40
+# 基准取自当前版本：非阻塞状态机 + SPI1 从机/DMA + USART3 恢复 + SPI 从机驱动。
+EXPECT_CODE=58000
+CODE_TOL=500
 fail=0
 
 pass() { printf '  [ OK ] %s\n' "$1"; }
@@ -83,6 +83,32 @@ has Core/Src/spi.c "SPI_MODE_SLAVE"                            "SPI1 从机模�
 has Core/Src/spi.c "SPI_NSS_HARD_INPUT"                        "SPI1 硬件 NSS 输入"
 has Core/Src/spi.c "hdma_spi1_rx"                              "SPI1 RX DMA 句柄"
 has Core/Src/spi.c "DMA_REQUEST_SPI1_RX"                       "SPI1 RX DMA 请求"
+# SPI 从机 DMA 优先级检查（§14.4）
+has Core/Src/spi.c "hdma_spi1_rx.Init.Priority = DMA_PRIORITY_LOW" "SPI RX DMA 流优先级 Low"
+has Core/Src/dma.c "HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 1, 0)" "SPI RX DMA NVIC 优先级 1"
+# SPI 从机驱动代码检查
+has USE/spi_slave.c "Spi_SlaveInit"                            "SPI 从机初始化函数"
+has USE/spi_slave.c "Spi_SlavePoll"                            "SPI 从机轮询函数"
+has USE/spi_slave.c "Spi_SlaveIsAlive"                         "SPI 从机存活检测"
+has USE/spi_slave.c "Spi_SlaveValidCount"                      "SPI 从机有效帧计数"
+has USE/spi_slave.c "Spi_SlaveErrorCount"                      "SPI 从机错误帧计数"
+has USE/spi_slave.c "Spi_SlaveOverrunCount"                    "SPI 从机溢出计数"
+has USE/spi_slave.c "HAL_SPI_RxHalfCpltCallback"               "SPI DMA 半完成回调"
+has USE/spi_slave.c "HAL_SPI_RxCpltCallback"                   "SPI DMA 完成回调"
+has USE/spi_slave.c "HAL_SPI_ErrorCallback"                    "SPI 错误回调"
+has USE/spi_slave.h "SPI_SLAVE_FRAME_WORDS"                    "SPI 帧字数定义"
+has USE/spi_slave.h "SPI_SLAVE_FRAME_SLOTS"                    "SPI 帧槽数定义"
+has USE/spi_slave.h "Spi_Frame_t"                              "SPI 帧结构定义"
+has USE/measure.c "Spi_SlaveInit()"                            "Measure_Init 调用 Spi_SlaveInit"
+has USE/measure.c "Spi_SlavePoll(&spi)"                        "Measure_Service 调用 Spi_SlavePoll"
+has USE/measure.c "UartDebug_LogCompare(&frf_point, &spi)"     "Measure_Service 调用 UartDebug_LogCompare"
+has USE/measure.c "SCREEN_E21_SPI_LINK"                        "Measure_Service 使用 E21 错误码"
+has USE/screen.h "SCREEN_E21_SPI_LINK"                         "screen.h 定义 E21 错误码"
+has USE/screen.c "SPI_LINK"                                     "screen.c 定义 E21 错误名称"
+has USE/uart_debug.c "UartDebug_LogCompare"                    "uart_debug 实现比对函数"
+has USE/uart_debug.c "UartDebug_DropCount"                     "uart_debug 实现丢包计数"
+has USE/uart_debug.h "UartDebug_LogCompare"                    "uart_debug.h 声明比对函数"
+has USE/uart_debug.h "UartDebug_DropCount"                     "uart_debug.h 声明丢包计数"
 has 9_30.ioc "Dma.SPI1_RX"                                     ".ioc 里有 SPI1_RX DMA"
 has 9_30.ioc "USART3.BaudRate=921600"                          ".ioc 里 USART3 仍在"
 has Core/Src/usart.c "MX_USART3_UART_Init"                     "USART3 初始化函数仍在"
@@ -114,6 +140,7 @@ has MDK-ARM/9_30.uvprojx "../USE/relay_range.c" "relay_range.c 仍在工程里"
 has MDK-ARM/9_30.uvprojx "../USE/measure.c"     "measure.c 仍在工程里"
 has MDK-ARM/9_30.uvprojx "../USE/screen.c"      "screen.c 仍在工程里"
 has MDK-ARM/9_30.uvprojx "../USE/uart_debug.c"  "uart_debug.c 仍在工程里"
+has MDK-ARM/9_30.uvprojx "../USE/spi_slave.c"   "spi_slave.c 在工程里"
 has MDK-ARM/9_30.uvprojx "../USE"               "头文件路径含 ../USE"
 
 echo

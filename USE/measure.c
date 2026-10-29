@@ -6,6 +6,7 @@
 
 #include "adc.h"
 #include "screen.h"
+#include "spi_slave.h"
 #include "tim.h"
 #include "relay_range.h"
 #include "uart_debug.h"
@@ -1269,6 +1270,10 @@ void Measure_Init(void)
     }
   }
 
+  /* 启动 SPI1 从机 DMA 循环接收（§6.1）
+   * 失败只影响比对不影响测量（方案 3 双路并行） */
+  Spi_SlaveInit();
+
   /* ==================== 首次扫描（用状态机驱动） ==================== */
   Screen_SetStage("SCAN");
   Screen_ClearResult();
@@ -1534,8 +1539,21 @@ void Measure_Service(void)
 
                 if (CircuitID_Compute(&s_cached_window, &frf_point) != 0u)
                 {
+                    Spi_Frame_t spi;
+                    uint8_t     spi_ok = Spi_SlavePoll(&spi);
+
                     Screen_SetResult(&frf_point);
                     UartDebug_LogMeasurement(&frf_point, &s_cached_window, Relay_Get());
+
+                    if (spi_ok != 0u)
+                    {
+                        UartDebug_LogCompare(&frf_point, &spi);   /* §6.2 */
+                    }
+                    else if (Spi_SlaveIsAlive() == 0u)
+                    {
+                        Screen_ReportError(SCREEN_E21_SPI_LINK);  /* 只提示，不影响本次结果 */
+                    }
+
                     s_scan_fail_count = 0u;
                 }
                 else

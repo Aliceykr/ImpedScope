@@ -44,7 +44,8 @@ static const char * const s_error_names[SCREEN_ERROR_CODE_MAX + 1u] =
     "ADC_OVR",        /* E17 */
     "ADC_DMA",        /* E18 */
     "ADC_CLIP_UI",    /* E19 */
-    "ADC_CLIP_UO"     /* E20 */
+    "ADC_CLIP_UO",    /* E20 */
+    "SPI_LINK"        /* E21 */
 };
 
 /* HAL_UART_Transmit_IT 发送期间缓冲区必须保持有效，故使用静态数组。 */

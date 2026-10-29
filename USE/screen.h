@@ -39,7 +39,8 @@ typedef enum
     SCREEN_E18_ADC_DMA        = 18u, /* ADC 的 DMA 传输错误,非致命               */
     SCREEN_E19_ADC_CLIP_UI    = 19u, /* Ui 波形贴 ADC 量程边(削顶),结果不可信  */
     SCREEN_E20_ADC_CLIP_UO    = 20u, /* Uo 波形贴 ADC 量程边(削顶),结果不可信  */
-    SCREEN_ERROR_CODE_MAX     = 20u
+    SCREEN_E21_SPI_LINK       = 21u, /* SPI 从机超过 SPI_SLAVE_ALIVE_MS 没有有效帧 */
+    SCREEN_ERROR_CODE_MAX     = 21u
 } Screen_ErrorCode_t;
 
 /* 复位发送状态并记录起始时间；在 MX_UART4_Init() 之后调用。 */

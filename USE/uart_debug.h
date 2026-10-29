@@ -7,6 +7,7 @@ extern "C" {
 
 #include "main.h"
 #include "measure.h"
+#include "spi_slave.h"   /* UartDebug_LogCompare 使用 Spi_Frame_t */
 
 /*
  * 第二路串口：USART3（PB10 = TX，TX-only），921600 8N1。
@@ -43,6 +44,12 @@ void UartDebug_Printf(const char *format, ...);
 void UartDebug_LogMeasurement(const FRF_Point_t *point,
                               const ADC_Window_t *window,
                               uint8_t range_index);
+
+/* 输出 SPI 与 DFT 的比对结果（§6.3）。 */
+void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi);
+
+/* 整行丢弃计数：环形缓冲塞不下时累加。联调时用它判断调试输出是否挤占测量日志。 */
+uint16_t UartDebug_DropCount(void);
 
 /* 输出一行事件，例如 "BOOT"、"SCAN_FAIL"。 */
 void UartDebug_LogEvent(const char *event);

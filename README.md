@@ -39,7 +39,7 @@
 - ADC1/ADC2 双 ADC 规则组同步采样，TIM6 TRGO 触发 300 kHz，CDR 打包 + DMA。
 - UART4（921600）驱动串口屏；USART3（PB10，921600，TX-only）输出调试日志。
 - 调试口为 SWD（PA13/PA14），没有调试 UART 复用。
-- SPI1 仍初始化但当前无从设备，不参与测量。
+- SPI1 配置为从机模式，通过 DMA 循环接收 FPGA 推送的测量帧，用于与 ADC+DFT 结果并行比对（见 §6）。
 
 ## 3. 工程结构
 
@@ -49,17 +49,18 @@
 │  ├─ measure.h/.c        测量核心：频率、ADC 采样与单频 DFT、H/Z/Y、标定、应用层循环
 │  ├─ screen.h/.c         串口屏 UART4 协议、错误码、b0/b1/b2 按键、按键服务
 │  ├─ relay_range.h/.c    三路继电器反馈电阻（b1 单击切档）
-│  └─ uart_debug.h/.c     USART3 调试日志（TX-only、环形缓冲）
+│  ├─ spi_slave.h/.c      SPI1 从机驱动：DMA 循环接收 FPGA 帧、CRC 校验、帧解析
+│  └─ uart_debug.h/.c     USART3 调试日志（TX-only、环形缓冲、SPI/DFT 比对输出）
 ├─ Core/
 │  ├─ Src/main.c          初始化、主循环（三个高层调用）
 │  ├─ Src/usart.c         UART4（屏幕）+ USART3（调试）
 │  ├─ Src/adc.c           ADC1/ADC2 双 ADC 同步配置
 │  ├─ Src/tim.c           TIM6，TRGO 触发 ADC
-│  ├─ Src/spi.c           SPI1（当前无设备）
-│  ├─ Src/stm32h7xx_it.c  中断入口（含 ADC/UART4/USART3）
+│  ├─ Src/spi.c           SPI1 从机模式配置
+│  ├─ Src/stm32h7xx_it.c  中断入口（含 ADC/UART4/USART3/SPI DMA）
 │  └─ Src/gpio.c          CubeMX 生成的 GPIO
 ├─ Drivers/               STM32H7 HAL、CMSIS
-├─ MDK-ARM/               Keil 工程（39 个源文件）
+├─ MDK-ARM/               Keil 工程（40 个源文件）
 └─ 9_30.ioc               CubeMX 配置
 ```
 
@@ -83,10 +84,11 @@
 | SWD | PA13 / PA14 | Serial Wire | 调试/下载 |
 | HSE | PH0 / PH1 | 外部晶振 | 系统时钟 |
 | LSE | PC14 / PC15 | 32.768 kHz | RTC 备选 |
-| SPI1 | PB5 / PG11 / PG9 | MOSI/SCK/MISO | 当前无设备 |
+| SPI1 | PB5 / PG11 / PG9 | MOSI/SCK/MISO | 从机接收 FPGA 数据（PG10 = NSS） |
 
 - PB11 不使用（USART3 只配 TX）。
-- PA4 不分配。
+- PA4 不分配（原 DDS 片选已释放）。
+- PG10 配置为 SPI1_NSS 硬件输入（FPGA 提供片选信号）。
 - 所有模拟输入为 0–3.3 V 单端，无负压。
 
 ## 5. 主循环与数据流
@@ -96,7 +98,7 @@
   → HAL/时钟/GPIO/DMA/SPI1/UART4/USART3/ADC1/TIM6/ADC2
   → Screen_Init()            启动 UART4 接收（b0/b1/b2）
   → UartDebug_Init()          调试口就绪，输出 banner
-  → Measure_Init()           CircuitID → Relay → ADC → 首次扫描
+  → Measure_Init()           CircuitID → Relay → ADC → SPI 从机 → 首次扫描
   → 主循环（每轮三个调用）
        Screen_KeyService()   处理按键，设置请求标志
        Measure_Service()     执行扫描或一次测量周期
@@ -252,7 +254,76 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 - 自动模式下按 b1：**先关闭自动，再切到下一档**（手动接管）。
 - 复位后自动关闭、回到 1.5 kΩ；切档本身阻塞约 20 ms 并丢弃当前窗口。
 
-## 9. 串口屏（UART4）
+## 9. SPI 从机与双路并行（FPGA 数据接收）
+
+### 9.1 概述
+
+SPI1 配置为从机模式，通过 DMA 循环接收 FPGA 推送的测量帧。每个测量周期：
+- DFT 值照常输出到串口屏
+- SPI 帧换算成 Y 并与 DFT 值比对，结论只写 USART3 日志
+- SPI 超时/持续坏帧 → 报错误码 E21，DFT 路径不受影响（双路并行）
+
+### 9.2 硬件连接
+
+```text
+FPGA (Master)                    STM32H750 (Slave)
+  MOSI  ───────────────────────►  PB5   (SPI1_MOSI，从机时是输入)
+  SCK   ───────────────────────►  PG11  (SPI1_SCK，从机时是输入)
+  CS    ───────────────────────►  PG10  (SPI1_NSS，硬件输入，低有效)
+  MISO  ◄───────────────────────  PG9   (可选；本阶段 H7 不发，保持高阻/悬空)
+  GND   ────────────────────────  GND   (必须共地)
+```
+
+### 9.3 帧协议
+
+- 单位：16 位字（SPI1 配的是 16 位帧）
+- 位序：MSB first；32 位量拆成高字在前、低字在后
+- 一帧 = 10 个字 = 20 字节
+- 每帧独立，帧间无间隔要求；FPGA 只需保证 CS 一帧拉低一次
+
+| Word | 字段 | 类型 | 说明 |
+|---|---|---|---|
+| 0 | `HEAD` | `0xA55A` | 帧头，固定 |
+| 1 | `seq` | u16 | 帧序号，每帧 +1，溢出回绕 |
+| 2 | `flags` | u16 | bit0=本帧有效；bit1=FPGA 侧削顶；bit2=频率字段有效 |
+| 3 | `f_hi` | u16 | 频率 Hz，高 16 位 |
+| 4 | `f_lo` | u16 | 频率 Hz，低 16 位 |
+| 5 | `mag_hi` | u16 | `\|H\| × 1e6`（u32），高 16 位 |
+| 6 | `mag_lo` | u16 | 同上，低 16 位 |
+| 7 | `phi_hi` | u16 | `φH`，单位毫度（int32，补码），高 16 位 |
+| 8 | `phi_lo` | u16 | 同上，低 16 位 |
+| 9 | `crc` | u16 | CRC-16/CCITT-FALSE，初值 0xFFFF，多项式 0x1021 |
+
+### 9.4 调试输出
+
+通过 USART3 输出 SPI 调试信息，编译期分级宏控制：
+
+| 等级 | 输出内容 | 默认 |
+|---|---|---|
+| LEVEL=0 | 全关（量产） | ✗ |
+| LEVEL=1 | 初始化 + 错误 + 每秒统计（稳态约 1 行/秒） | ✓ |
+| LEVEL=2 | 额外按时间节流打印 SPIRX（联调用，10 行/秒） | ✗ |
+| LEVEL=3 | 再额外 dump SPIRAW 原始字（查字对齐/位序） | ✗ |
+
+**关键约束**：
+- 限速靠时间，不靠帧数（避免高帧率时刷爆日志缓冲）
+- DMA 回调里只累加计数、置标志，所有打印只在主循环上下文发出
+- 联调完必须把等级降回 1（避免挤占测量日志）
+
+### 9.5 测试用例
+
+| # | 用例 | 预期 |
+|---|---|---|
+| S1 | FPGA 持续发帧 | `ok` 递增、`err/ovr=0`；USART3 每测量周期一行 `SPI ...` |
+| S2 | 拔掉 FPGA | 200 ms 后屏上出现 E21，DFT 结果照常刷新；插回后 E21 自动消失 |
+| S3 | 故意发错 CRC | `err` 递增，坏帧不被采用（`seq` 不前进） |
+| S4 | 先断后接导致字错位 | 连续 4 帧失败后自动重同步，恢复出数 |
+| S5 | 接 1 kΩ 0.1% 电阻 | `dY_permille` < 20（2%）、`dP_mdeg` < 200（0.2°） |
+| S6 | 切档（b1）后再测 | SPI 结果随之变化，无异常帧 |
+| S7 | 自动量程开启（b2） | 行为不变，SPI 只记录 |
+| S8 | 长时间运行 30 min | 无 OVR 累积、无内存越界 |
+
+## 10. 串口屏（UART4）
 
 - UART4，**921600 8N1**，PC10 TX / PC11 RX，DMA/中断均不使用，阻塞发送。
 - 每 500 ms 发一整帧 `t0`–`t10`，每条 `控件名.txt="值"` + `FF FF FF`；条间留 2 ms 给 HMI 重绘。
@@ -444,6 +515,7 @@ phase_deg = angle(H_thru)
 | E18 | ADC_DMA | `measure.c` | ADC DMA 错误，弃窗 | 非致命 |
 | E19 | ADC_CLIP_UI | `measure.c` | `Ui` 削顶 | 非致命 |
 | E20 | ADC_CLIP_UO | `measure.c` | `Uo` 削顶 | 非致命 |
+| E21 | SPI_LINK | `measure.c` | SPI 从机链路超时（>200 ms 无有效帧） | 非致命 |
 
 时钟配置失败发生在 UART 就绪前，屏幕无法显示，只能用调试器定位。
 
@@ -464,7 +536,7 @@ phase_deg = angle(H_thru)
 
 - Keil MDK-ARM 打开 `MDK-ARM/9_30.uvprojx`；ArmClang V6.24（`.uvprojx` 的 `pArmCC` 已钉到该版本）。
 - CubeMX 6.18，HAL FW 1.13；系统时钟 480 MHz，HCLK 120 MHz，APB 60 MHz；ADC 37.5 MHz；SPI1 75 MHz。
-- 当前 **39 个源文件**，含 `relay_range.c`、`uart_debug.c`。
+- 当前 **40 个源文件**，含 `relay_range.c`、`uart_debug.c`、`spi_slave.c`。
 - 命令行构建：
 
 ```bash
@@ -479,8 +551,8 @@ CubeMX 重新生成后检查：
    - USER CODE BEGIN 2: `Screen_Init()`, `UartDebug_Init()`, `Measure_Init()`
    - USER CODE BEGIN WHILE: `Screen_KeyService()`, `Measure_Service()`, `Screen_Poll()`
 4. `adc.c` 的 `ADC_DUALMODE_REGSIMULT`/`DualModeData`/`TwoSamplingDelay` 仍在 `USER CODE BEGIN ADC1_Init 2` 区；ADC1 的 DMA 为 Word 对齐。
-5. TIM6 的 PSC/ARR 与 `ADC_SAMPLER_RATE_HZ` 一致；SPI1 仍为主机但无设备。
-6. `relay_range.c`、`uart_debug.c` 在 `Application/User/USE` 组。
+5. TIM6 的 PSC/ARR 与 `ADC_SAMPLER_RATE_HZ` 一致；SPI1 为从机模式，DMA 循环接收 FPGA 帧。
+6. `relay_range.c`、`uart_debug.c`、`spi_slave.c` 在 `Application/User/USE` 组。
 
 **代码架构说明**：
 - `main.c` 只负责初始化和调用三个高层函数

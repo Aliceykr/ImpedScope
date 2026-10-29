@@ -591,6 +591,11 @@
               <FileType>1</FileType>
               <FilePath>../USE/uart_debug.c</FilePath>
             </File>
+            <File>
+              <FileName>spi_slave.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../USE/spi_slave.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
