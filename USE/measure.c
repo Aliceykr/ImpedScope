@@ -913,12 +913,33 @@ static uint8_t CircuitID_IsFinite(double value)
 static uint8_t s_scan_request;
 static uint8_t s_range_request;
 static uint8_t s_scan_fail_count;
-static uint8_t s_scan_aborted;   /* 扫描被 B1 中止标志 */
 
 /* 自动量程状态。s_autorange_toggle 由按键层置位，Measure_Service() 消费。 */
 static uint8_t s_autorange_on;
 static uint8_t s_autorange_toggle;
 static uint8_t s_autorange_upshift_count;   /* 连续"该升增益"的窗口数 */
+
+/* ==================== 状态机 ==================== */
+
+/* 全局操作状态 */
+static MeasureState_t s_state = MEASURE_STATE_IDLE;
+
+/* MEASURING 状态的缓存 */
+static uint32_t s_measure_deadline;
+static ADC_Window_t s_cached_window;
+static uint8_t s_window_ready;
+
+/* SWEEPING 状态的缓存 */
+static const uint32_t s_sweep_candidates[] = { 1000u, 10000u, 3000u, 300u, 100u };
+static uint8_t s_sweep_index;              /* 当前候选索引 */
+static uint8_t s_sweep_stage;              /* 0=设置频率, 1=等待窗口, 2=评估, 3=完成 */
+static uint32_t s_sweep_candidate;         /* 当前候选频率 */
+static uint32_t s_sweep_deadline;
+static uint32_t s_sweep_best_f;
+static double s_sweep_best_score;
+static uint8_t s_sweep_got;                /* 当前候选是否拿到窗口 */
+static ADC_Window_t s_sweep_window;
+static uint8_t s_sweep_aborted;            /* B1 中止标志 */
 
 /* 请求函数（由 screen.c 调用） */
 void Measure_RequestScan(void)
@@ -934,6 +955,11 @@ void Measure_RequestNextRange(void)
 void Measure_RequestAutoRangeToggle(void)
 {
     s_autorange_toggle = 1u;
+}
+
+MeasureState_t Measure_GetState(void)
+{
+    return s_state;
 }
 
 /* 切换自动量程开关，并同步屏幕与日志。
@@ -952,108 +978,131 @@ uint8_t Measure_IsAutoRange(void)
     return s_autorange_on;
 }
 
-/* 外部信号源只会在 100/300/1k/3k/10k 五档之间切换。
- * 依次用五个候选频率开一个 DFT 窗口，按 Ui 的单频幅值和相干性选最可信的一档。
- * 候选顺序把常用的 1k、10k 放前面; 命中一个高相干候选就提前结束。
- * 返回选中的频率; 五档都没有可信信号时返回 0, 并保持默认 1 kHz。 */
-static uint32_t FreqScan_Select(void)
+/* ==================== 非阻塞频率扫描 ==================== */
+
+/* 状态机步骤：每次调用执行一小步，立即返回。
+ * 返回: 0=未完成, 1=已完成, 2=被B1中止 */
+static uint8_t FreqScanStep(void)
 {
-  static const uint32_t candidates[] = { 1000u, 10000u, 3000u, 300u, 100u };
-  uint32_t best_f = 0u;
-  double   best_score = 0.0;
-  uint8_t  i;
-  uint8_t  b1_abort = 0u;   /* B1 中止标志：退出外层 for 循环 */
-
-  s_scan_aborted = 0u;      /* 每次扫描开始前清除中止标志 */
-  Screen_ClearResult();
-
-  for (i = 0u; i < (uint8_t)(sizeof(candidates) / sizeof(candidates[0u])); ++i)
-  {
-    uint32_t     f = candidates[i];
-    uint32_t     deadline;
-    uint8_t      got = 0u;
-    ADC_Window_t window;
-
-    if (ADC_Sampler_SetFrequency(f) == 0u)
+    switch (s_sweep_stage)
     {
-      continue;
-    }
-
-    deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
-    while ((int32_t)(HAL_GetTick() - deadline) < 0)
-    {
-      /* 检测 B1 按键：扫描期间用户可能想切档，提前结束扫描 */
-      if (Screen_PeekKey() == SCREEN_KEY_B1)
-      {
-        b1_abort = 1u;
-        break;  /* 退出当前 while */
-      }
-
-      if (ADC_Sampler_GetWindow(&window) != 0u)
-      {
-        got = 1u;
-        break;
-      }
-      Screen_Poll();
-      HAL_Delay(1u);
-    }
-
-    /* B1 中止：退出外层 for 循环，不再扫描剩余频率 */
-    if (b1_abort != 0u)
-    {
-      break;
-    }
-
-    if ((got == 0u) || (window.sample_count == 0u))
-    {
-      continue;
-    }
-
-    {
-      double n = (double)window.sample_count;
-      double ui_mag = 2.0 * sqrt((window.ui_re * window.ui_re) +
-                                 (window.ui_im * window.ui_im)) / n;
-      double ui_coh = 0.0;
-      double score;
-
-      if (window.ui_rms > 0.0)
-      {
-        ui_coh = ui_mag / (1.41421356237 * window.ui_rms);
-      }
-
-      score = ui_mag * ui_coh;
-      if ((ui_mag > (double)CIR_INPUT_MIN_AMP) && (ui_coh > 0.5) &&
-          (score > best_score))
-      {
-        best_score = score;
-        best_f = f;
-
-        /* 相干性接近 1, 已经确定是这一档, 不必再等更低的候选频率。 */
-        if (ui_coh > 0.95)
+        case 0:  /* 开始新一轮扫描或前进到下一候选 */
         {
-          break;
+            if (s_sweep_index >= (uint8_t)(sizeof(s_sweep_candidates) / sizeof(s_sweep_candidates[0])))
+            {
+                /* 扫描完成 */
+                if (s_sweep_best_f != 0u)
+                {
+                    Measure_SetFrequency(s_sweep_best_f);
+                    ADC_Sampler_SetFrequency(s_sweep_best_f);
+                }
+                else
+                {
+                    /* 无有效信号，回退到 1kHz */
+                    Measure_SetFrequency(1000u);
+                    ADC_Sampler_SetFrequency(1000u);
+                }
+                s_sweep_index = 0u;
+                s_sweep_stage = 3;  /* 标记完成 */
+                return 1u;
+            }
+
+            s_sweep_candidate = s_sweep_candidates[s_sweep_index];
+            s_sweep_got = 0u;
+
+            if (ADC_Sampler_SetFrequency(s_sweep_candidate) == 0u)
+            {
+                /* 频率设置失败，跳过此候选 */
+                ++s_sweep_index;
+                return 0u;  /* 继续下一次调用 */
+            }
+
+            s_sweep_deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+            s_sweep_stage = 1;
+            return 0u;
         }
-      }
-    }
-  }
 
-  if (best_f == 0u)
-  {
-    /* 如果是因为 B1 中止而退出，不设置频率，直接返回 0 */
-    if (b1_abort != 0u)
-    {
-      s_scan_aborted = 1u;   /* 标记扫描被 B1 中止 */
-      return 0u;   /* 不设置频率，避免闪 E04 */
-    }
-    (void)Measure_SetFrequency(1000u);
-    (void)ADC_Sampler_SetFrequency(1000u);
-    return 0u;
-  }
+        case 1:  /* 等待窗口 */
+        {
+            /* 检测 B1 中止 */
+            if (Screen_PeekKey() == SCREEN_KEY_B1)
+            {
+                /* 消费掉 B1 事件，标记中止 */
+                (void)Screen_PollKey();
+                s_sweep_aborted = 1u;
+                s_sweep_stage = 3;
+                return 2u;  /* 被中止 */
+            }
 
-  (void)Measure_SetFrequency(best_f);
-  (void)ADC_Sampler_SetFrequency(best_f);
-  (void)Screen_SetActiveFreq(best_f);
-  return best_f;
+            if (ADC_Sampler_GetWindow(&s_sweep_window) != 0u)
+            {
+                s_sweep_got = 1u;
+                s_sweep_stage = 2;
+                return 0u;
+            }
+
+            if ((int32_t)(HAL_GetTick() - s_sweep_deadline) >= 0)
+            {
+                /* 超时，跳过此候选 */
+                ++s_sweep_index;
+                s_sweep_stage = 0;
+                return 0u;
+            }
+
+            return 0u;  /* 还没完成 */
+        }
+
+        case 2:  /* 评估当前候选 */
+        {
+            if ((s_sweep_got == 0u) || (s_sweep_window.sample_count == 0u))
+            {
+                ++s_sweep_index;
+                s_sweep_stage = 0;
+                return 0u;
+            }
+
+            {
+                double n = (double)s_sweep_window.sample_count;
+                double ui_mag = 2.0 * sqrt((s_sweep_window.ui_re * s_sweep_window.ui_re) +
+                                           (s_sweep_window.ui_im * s_sweep_window.ui_im)) / n;
+                double ui_coh = 0.0;
+                double score;
+
+                if (s_sweep_window.ui_rms > 0.0)
+                {
+                    ui_coh = ui_mag / (1.41421356237 * s_sweep_window.ui_rms);
+                }
+
+                score = ui_mag * ui_coh;
+                if ((ui_mag > (double)CIR_INPUT_MIN_AMP) && (ui_coh > 0.5) &&
+                    (score > s_sweep_best_score))
+                {
+                    s_sweep_best_score = score;
+                    s_sweep_best_f = s_sweep_candidate;
+
+                    /* 相干性接近 1，提前结束 */
+                    if (ui_coh > 0.95)
+                    {
+                        ++s_sweep_index;  /* 跳过剩余候选 */
+                        s_sweep_stage = 0;
+                        return 0u;
+                    }
+                }
+            }
+
+            ++s_sweep_index;
+            s_sweep_stage = 0;
+            return 0u;
+        }
+
+        case 3:  /* 完成 */
+            s_sweep_stage = 0;
+            return 1u;
+
+        default:
+            s_sweep_stage = 0;
+            return 1u;
+    }
 }
 
 /* ==========================================================================
@@ -1192,6 +1241,17 @@ void Measure_Init(void)
   s_autorange_toggle = 0u;
   s_autorange_upshift_count = 0u;
 
+  /* ==================== 状态机初始化 ==================== */
+  s_state = MEASURE_STATE_IDLE;
+  s_window_ready = 0u;
+  s_sweep_index = 0u;
+  s_sweep_stage = 0;
+  s_sweep_aborted = 0u;
+  s_sweep_best_f = 0u;
+  s_sweep_best_score = 0.0;
+  memset(&s_cached_window, 0, sizeof(s_cached_window));
+  memset(&s_sweep_window, 0, sizeof(s_sweep_window));
+
   Screen_SetStage("MODULE");
 
   {
@@ -1208,203 +1268,292 @@ void Measure_Init(void)
       Screen_Fatal(SCREEN_E01_HAL_INIT);
     }
   }
-  Screen_SetStage("SCAN");
-  {
-    uint32_t detected = FreqScan_Select();
 
-    Screen_SetStage("LOOP");
-    if (detected == 0u)
+  /* ==================== 首次扫描（用状态机驱动） ==================== */
+  Screen_SetStage("SCAN");
+  Screen_ClearResult();
+
+  /* 初始化扫描状态 */
+  s_sweep_index = 0u;
+  s_sweep_stage = 0;
+  s_sweep_aborted = 0u;
+  s_sweep_best_f = 0u;
+  s_sweep_best_score = 0.0;
+  s_state = MEASURE_STATE_SWEEPING;
+
+  /* 驱动状态机直到完成（初始化阶段可以接受阻塞） */
+  while (s_state == MEASURE_STATE_SWEEPING)
+  {
+    uint8_t result = FreqScanStep();
+    if (result == 1u)  /* 完成 */
     {
-      /* 检查是否因为 B1 中止，如果是则不报 E04 */
-      if (s_scan_aborted != 0u)
-      {
-        s_scan_aborted = 0u;   /* 清除中止标志 */
-        /* 不报 E04，首次扫描时用户不可能按 b1，这里只是统一处理 */
-      }
-      else
-      {
-        Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
-      }
+      s_state = MEASURE_STATE_IDLE;
+      break;
     }
+    if (result == 2u)  /* 被 B1 中止（不应该发生在初始化） */
+    {
+      s_state = MEASURE_STATE_IDLE;
+      break;
+    }
+    Screen_Poll();
+  }
+
+  Screen_SetStage("LOOP");
+
+  /* 检查扫描结果 */
+  if (s_sweep_best_f == 0u)
+  {
+    /* 无有效信号，回退到 1 kHz 并报 E04 */
+    Measure_SetFrequency(1000u);
+    ADC_Sampler_SetFrequency(1000u);
+    Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+  }
+  else
+  {
+    Measure_SetFrequency(s_sweep_best_f);
+    ADC_Sampler_SetFrequency(s_sweep_best_f);
   }
 }
 
-/* 主测量循环：执行一次测量周期或处理请求 */
+/* 主测量循环：状态机驱动，非阻塞 */
 void Measure_Service(void)
 {
-    uint32_t f;
-    ADC_Window_t window;
-    FRF_Point_t frf_point;
-    uint32_t deadline;
-    uint8_t  got = 0u;
-    uint8_t  b1_abort = 0u;
-
-    /* 处理自动量程开关请求 */
+    /* ==================== 步骤1: 处理自动量程开关（立即处理） ==================== */
     if (s_autorange_toggle != 0u)
     {
         s_autorange_toggle = 0u;
-        (void)Measure_ToggleAutoRange();    /* 内部负责翻转、刷 t10、打日志 */
+        (void)Measure_ToggleAutoRange();
         return;
     }
 
-    /* 处理切档请求 */
-    if (s_range_request != 0u)
+    /* ==================== 步骤2: 状态机主循环 ==================== */
+    switch (s_state)
     {
-        s_range_request = 0u;
-
-        if (s_autorange_on != 0u)
+        case MEASURE_STATE_IDLE:
         {
-            s_autorange_on = 0u;                    /* 手动接管，先退出自动 */
-            s_autorange_upshift_count = 0u;
-            UartDebug_Printf("AUTORANGE 0\r\n");
-        }
-
-        uint8_t next = Relay_Next();       /* 阻塞约 20 ms：先断后合 */
-
-        CircuitID_SetFeedbackResistor(Relay_GetOhm());
-        Screen_ClearResult();
-        Screen_ClearError();
-        Screen_FlushRange();
-        (void)ADC_Sampler_Restart();
-        UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
-        return;
-    }
-
-    /* 处理重扫请求 */
-    if (s_scan_request != 0u)
-    {
-        s_scan_request = 0u;
-        Screen_SetStage("SCAN");
-        if (FreqScan_Select() != 0u)
-        {
-            Screen_SetStage("LOOP");
-        }
-        else
-        {
-            Screen_SetStage("LOOP");
-            /* 检查是否因为 B1 中止，如果是则不报 E04 */
-            if (s_scan_aborted != 0u)
+            /* 检查扫描请求 */
+            if (s_scan_request != 0u)
             {
-                s_scan_aborted = 0u;   /* 清除中止标志 */
-                /* 不报 E04，下一轮处理 b1 切档 */
+                s_scan_request = 0u;
+                s_sweep_aborted = 0u;
+                s_sweep_index = 0u;
+                s_sweep_stage = 0;
+                s_sweep_best_f = 0u;
+                s_sweep_best_score = 0.0;
+                Screen_SetStage("SCAN");
+                Screen_ClearResult();
+                s_state = MEASURE_STATE_SWEEPING;
+                return;
             }
-            else
+
+            /* 检查切档请求 */
+            if (s_range_request != 0u)
             {
-                Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+                s_range_request = 0u;
+
+                /* 手动接管：关闭自动量程 */
+                if (s_autorange_on != 0u)
+                {
+                    s_autorange_on = 0u;
+                    s_autorange_upshift_count = 0u;
+                    UartDebug_Printf("AUTORANGE 0\r\n");
+                }
+
+                /* 开始异步切档 */
+                (void)Relay_NextAsync();
+                s_state = MEASURE_STATE_SWITCHING;
+                return;
             }
-        }
-        s_scan_fail_count = 0u;
-        Screen_ClearB0Pending();  /* 清除 b0 pending 标志，允许下次 b0 重新触发 */
-        return;
-    }
 
-    /* 自动重扫机制：连续失败 3 次后自动重新扫描（与 b0 无关） */
-    if (s_scan_fail_count >= 3u)
-    {
-      Screen_SetStage("SCAN");
-      if (FreqScan_Select() != 0u)
-      {
-        Screen_SetStage("LOOP");
-      }
-      else
-      {
-        Screen_SetStage("LOOP");
-        /* 检查是否因为 B1 中止，如果是则不报 E04 */
-        if (s_scan_aborted != 0u)
+            /* 自动重扫机制：连续失败 3 次后自动重新扫描 */
+            if (s_scan_fail_count >= 3u)
+            {
+                s_scan_fail_count = 0u;
+                s_sweep_aborted = 0u;
+                s_sweep_index = 0u;
+                s_sweep_stage = 0;
+                s_sweep_best_f = 0u;
+                s_sweep_best_score = 0.0;
+                Screen_SetStage("SCAN");
+                Screen_ClearResult();
+                s_state = MEASURE_STATE_SWEEPING;
+                return;
+            }
+
+            /* 进入测量状态 */
+            {
+                uint32_t f = Measure_GetFrequency();
+                ADC_Window_t window;
+
+                Freq_SourceSet(f);
+                if (ADC_Sampler_SetFrequency(f) == 0u)
+                {
+                    Screen_ReportError(SCREEN_E02_CIR_CFG);
+                    Screen_ClearResult();
+                    ++s_scan_fail_count;
+                    return;
+                }
+
+                if (Screen_SetActiveFreq(f) != 0u)
+                {
+                    Screen_ClearResult();
+                }
+
+                /* 尝试立即获取窗口 */
+                if (ADC_Sampler_GetWindow(&window) != 0u)
+                {
+                    s_cached_window = window;
+                    s_window_ready = 1u;
+                }
+                else
+                {
+                    s_window_ready = 0u;
+                    s_measure_deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+                }
+            }
+            s_state = MEASURE_STATE_MEASURING;
+            return;
+        }
+
+        case MEASURE_STATE_SWEEPING:
         {
-          s_scan_aborted = 0u;   /* 清除中止标志 */
-          /* 不报 E04，下一轮处理 b1 切档 */
+            uint8_t result = FreqScanStep();
+
+            if (result == 1u)  /* 完成 */
+            {
+                s_state = MEASURE_STATE_IDLE;
+                Screen_SetStage("LOOP");
+
+                if (s_sweep_aborted != 0u)
+                {
+                    s_sweep_aborted = 0u;
+                    /* 不报 E04，下一轮会处理 b1 */
+                }
+                else if (s_sweep_best_f == 0u)
+                {
+                    Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+                }
+                return;
+            }
+
+            if (result == 2u)  /* 被 B1 中止 */
+            {
+                s_state = MEASURE_STATE_IDLE;
+                Screen_SetStage("LOOP");
+                /* 不报 E04，设置切档请求让下一轮处理 */
+                s_range_request = 1u;
+                return;
+            }
+
+            /* 未完成，继续等待下次调用 */
+            Screen_Poll();
+            return;
         }
-        else
+
+        case MEASURE_STATE_SWITCHING:
         {
-          Screen_ReportError(SCREEN_E04_CIR_UI_LOW);
+            uint8_t done = Relay_NextAsync();
+
+            if (done != 0u)  /* 切档完成 */
+            {
+                uint8_t next = Relay_Get();
+                CircuitID_SetFeedbackResistor(Relay_GetOhm());
+                Screen_ClearResult();
+                Screen_ClearError();
+                Screen_FlushRange();
+                (void)ADC_Sampler_Restart();
+                UartDebug_Printf("RANGE %u %ld\r\n", (unsigned)next, (long)Relay_GetOhm());
+                s_state = MEASURE_STATE_IDLE;
+            }
+            return;
         }
-      }
-      s_scan_fail_count = 0u;
-      return;
-    }
 
-    f = Measure_GetFrequency();
+        case MEASURE_STATE_MEASURING:
+        {
+            /* 检查 B1/B2 按键 */
+            Screen_KeyEvent_t key = Screen_PeekKey();
+            if (key == SCREEN_KEY_B1)
+            {
+                /* 消费掉 B1，设置切档请求 */
+                (void)Screen_PollKey();
+                s_range_request = 1u;
+                s_state = MEASURE_STATE_IDLE;
+                return;
+            }
+            if (key == SCREEN_KEY_B2)
+            {
+                /* 消费掉 B2，设置自动量程切换请求 */
+                (void)Screen_PollKey();
+                s_autorange_toggle = 1u;
+                s_state = MEASURE_STATE_IDLE;
+                return;
+            }
 
-    /* 外部信号源必须同步到同一频率,固件只改自己的 DFT/窗口频率。 */
-    Freq_SourceSet(f);                    /* 空实现:激励由外部信号源提供,固件不设定 */
-    if (ADC_Sampler_SetFrequency(f) == 0u)
-    {
-      Screen_ReportError(SCREEN_E02_CIR_CFG);
-      Screen_ClearResult();
-      ++s_scan_fail_count;
-      Screen_Poll();
-      HAL_Delay(10u);
-      return;
-    }
+            /* 尝试获取窗口 */
+            if (s_window_ready == 0u)
+            {
+                if (ADC_Sampler_GetWindow(&s_cached_window) != 0u)
+                {
+                    s_window_ready = 1u;
+                }
+                else
+                {
+                    /* 检查超时 */
+                    if ((int32_t)(HAL_GetTick() - s_measure_deadline) >= 0)
+                    {
+                        Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
+                        Screen_ClearResult();
+                        ++s_scan_fail_count;
+                        s_state = MEASURE_STATE_IDLE;
+                        return;
+                    }
 
-    /* ADC 已按 f 开始新窗口,这时才让 t10 显示 f。
-     * 若显示频率变了,清掉上一频率的读数,避免 t0~t9 还是旧频率的结果。 */
-    if (Screen_SetActiveFreq(f) != 0u)
-    {
-      Screen_ClearResult();
-    }
+                    /* 还没完成 */
+                    Screen_Poll();
+                    return;
+                }
+            }
 
-    /* 等本频率的窗口完成。用墙钟比较,不用循环计数(见 MEASURE_WAIT_TIMEOUT_MS)。
-     * 期间检测 B1：如果用户在等待窗口时按 b1 切档，提前结束当前窗口并立即处理。 */
-    deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
-    while ((int32_t)(HAL_GetTick() - deadline) < 0)
-    {
-      /* 检测 B1 按键：窥视队列，发现 B1 则提前结束窗口 */
-      if (Screen_PeekKey() == SCREEN_KEY_B1)
-      {
-        b1_abort = 1u;
+            /* 处理窗口数据 */
+            {
+                FRF_Point_t frf_point;
+
+                /* 自动量程评估 */
+                if (s_autorange_on != 0u)
+                {
+                    if (Measure_AutoRangeStep(&s_cached_window) != 0u)
+                    {
+                        /* 已切档并重启窗口，本窗口不计算 */
+                        s_window_ready = 0u;
+                        s_measure_deadline = HAL_GetTick() + MEASURE_WAIT_TIMEOUT_MS;
+                        return;  /* 保持 MEASURING 状态，等待新窗口 */
+                    }
+                }
+
+                Screen_ClearError();
+
+                if (CircuitID_Compute(&s_cached_window, &frf_point) != 0u)
+                {
+                    Screen_SetResult(&frf_point);
+                    UartDebug_LogMeasurement(&frf_point, &s_cached_window, Relay_Get());
+                    s_scan_fail_count = 0u;
+                }
+                else
+                {
+                    Screen_ClearResult();
+                    ++s_scan_fail_count;
+                }
+            }
+
+            /* 完成一次测量，回到 IDLE */
+            s_window_ready = 0u;
+            s_state = MEASURE_STATE_IDLE;
+        }
         break;
-      }
 
-      if (ADC_Sampler_GetWindow(&window) != 0u)
-      {
-        got = 1u;
-        break;
-      }
-      Screen_Poll();
-      HAL_Delay(1u);
-    }
-
-    /* B1 提前终止：设置切档请求，让下一轮 Screen_KeyService() 统一处理
-     * 避免 B1 事件被消费两次（窗口等待中窥视到一次，队列中还有一次） */
-    if (b1_abort != 0u)
-    {
-      s_range_request = 1u;   /* 设置切档请求，不直接执行 Relay_Next() */
-      return;
-    }
-
-    if (got == 0u)
-    {
-      Screen_ReportError(SCREEN_E12_WINDOW_TIMEOUT);
-      Screen_ClearResult();               /* 不留上一频率的陈旧读数 */
-      ++s_scan_fail_count;
-      return;
-    }
-
-    /* 自动量程：每个窗口评估一次；切了档就丢掉本窗口，重新测。 */
-    if (s_autorange_on != 0u)
-    {
-        if (Measure_AutoRangeStep(&window) != 0u)
-        {
-            return;                 /* 已切档并重启窗口，本窗口不计算、不显示 */
-        }
-    }
-
-    /* 新窗口开始计算前清掉上一窗口的错误显示；若本窗口仍异常，
-     * CircuitID_Compute() 会通过 Screen_ReportError() 重新置位。 */
-    Screen_ClearError();
-
-    if (CircuitID_Compute(&window, &frf_point) != 0u)
-    {
-      Screen_SetResult(&frf_point);
-      UartDebug_LogMeasurement(&frf_point, &window, Relay_Get());
-      s_scan_fail_count = 0u;
-    }
-    else
-    {
-      Screen_ClearResult();               /* 计算失败同样清掉旧读数 */
-      ++s_scan_fail_count;
+        default:
+            s_state = MEASURE_STATE_IDLE;
+            break;
     }
 }
 

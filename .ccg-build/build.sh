@@ -6,9 +6,10 @@
 # Usage: build.sh [outdir]
 set -uo pipefail
 
-SRC_ROOT="C:/Users/KE/Desktop/opjjg/9_30"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_ROOT="${SRC_ROOT:-$ROOT}"
 OUT="${1:-/tmp/930build}"
-TOOL="D:/KEIL/CORE/ARM/ARMCLANG/bin"
+TOOL="E:/Keil_v5/ARM/ARMCLANG/bin"
 
 CPU_FLAGS="-mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard"
 DEFINES="-DUSE_PWR_LDO_SUPPLY -DUSE_HAL_DRIVER -DSTM32H750xx"

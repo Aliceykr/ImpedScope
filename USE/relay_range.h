@@ -56,6 +56,29 @@ uint8_t Relay_Set(uint8_t index);
  * 内部调用 Relay_Set()，会阻塞约 RELAY_RELEASE_MS + RELAY_SETTLE_MS。 */
 uint8_t Relay_Next(void);
 
+/* ==================== 非阻塞接口 ==================== */
+
+/* 切档状态（只读） */
+typedef enum {
+    RELAY_SW_IDLE = 0,       /* 空闲 */
+    RELAY_SW_RELEASING,      /* 断开当前档，等待释放 */
+    RELAY_SW_CLOSING,        /* 闭合目标档，等待建立 */
+} RelaySwitchState_t;
+
+/* 获取当前切档状态（用于调试） */
+RelaySwitchState_t Relay_GetSwitchState(void);
+
+/* 异步切到指定档。返回 0=未完成，1=已完成。
+ * 内部用状态机，不调用 HAL_Delay。
+ * 多次调用会累计进度，直到完成。 */
+uint8_t Relay_SetAsync(uint8_t index);
+
+/* 异步切到下一档。返回 0=未完成，1=已完成。 */
+uint8_t Relay_NextAsync(void);
+
+/* 当前是否正在切换 */
+uint8_t Relay_IsSwitching(void);
+
 #ifdef __cplusplus
 }
 #endif

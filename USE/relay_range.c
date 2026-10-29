@@ -9,7 +9,12 @@ static const float s_ohm[RELAY_COUNT] =
 
 static uint8_t s_index = RELAY_DEFAULT_INDEX;
 
-static void Relay_Write(uint8_t index, GPIO_PinState state)
+/* 非阻塞切档状态机 */
+static RelaySwitchState_t s_switch_state = RELAY_SW_IDLE;
+static uint8_t s_switch_target;          /* 目标档位 */
+static uint32_t s_switch_deadline;       /* 当前步骤的超时时间 */
+
+void Relay_Write(uint8_t index, GPIO_PinState state)
 {
     switch (index)
     {
@@ -83,4 +88,70 @@ uint8_t Relay_Next(void)
     (void)Relay_Set((uint8_t)((s_index + 1u) % RELAY_COUNT));
 
     return s_index;
+}
+
+/* ==================== 非阻塞实现 ==================== */
+
+RelaySwitchState_t Relay_GetSwitchState(void)
+{
+    return s_switch_state;
+}
+
+uint8_t Relay_IsSwitching(void)
+{
+    return (s_switch_state != RELAY_SW_IDLE) ? 1u : 0u;
+}
+
+uint8_t Relay_SetAsync(uint8_t index)
+{
+    if (index >= RELAY_COUNT)
+    {
+        return 0u;
+    }
+    if (index == s_index)
+    {
+        return 1u;  /* 已在目标档 */
+    }
+
+    switch (s_switch_state)
+    {
+        case RELAY_SW_IDLE:
+            /* 开始切换：断开当前档 */
+            s_switch_target = index;
+            Relay_Write(s_index, GPIO_PIN_RESET);
+            s_switch_state = RELAY_SW_RELEASING;
+            s_switch_deadline = HAL_GetTick() + RELAY_RELEASE_MS;
+            return 0u;
+
+        case RELAY_SW_RELEASING:
+            /* 等待释放完成 */
+            if ((int32_t)(HAL_GetTick() - s_switch_deadline) >= 0)
+            {
+                /* 释放完成，闭合目标档 */
+                s_index = s_switch_target;
+                Relay_Write(s_index, GPIO_PIN_SET);
+                s_switch_state = RELAY_SW_CLOSING;
+                s_switch_deadline = HAL_GetTick() + RELAY_SETTLE_MS;
+            }
+            return 0u;
+
+        case RELAY_SW_CLOSING:
+            /* 等待建立完成 */
+            if ((int32_t)(HAL_GetTick() - s_switch_deadline) >= 0)
+            {
+                s_switch_state = RELAY_SW_IDLE;
+                return 1u;  /* 完成 */
+            }
+            return 0u;
+    }
+
+    /* 不应该到这里 */
+    s_switch_state = RELAY_SW_IDLE;
+    return 1u;
+}
+
+uint8_t Relay_NextAsync(void)
+{
+    uint8_t next = (uint8_t)((s_index + 1u) % RELAY_COUNT);
+    return Relay_SetAsync(next);
 }

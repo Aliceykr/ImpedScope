@@ -18,8 +18,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/.ccg-build/verify-out}"
 
 EXPECT_FILES=39
-# 基准取自当前版本（b0/b1/b2 三键 + b2 自动量程）的实际编译结果。
-EXPECT_CODE=53210
+# 基准取自非阻塞状态机版本的实际编译结果（Measure_Service 状态机改造后）。
+EXPECT_CODE=54514
 CODE_TOL=400
 fail=0
 

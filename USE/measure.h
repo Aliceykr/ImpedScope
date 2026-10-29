@@ -318,6 +318,19 @@ uint8_t Measure_IsAutoRange(void);
  * 与 Measure_RequestScan()/Measure_RequestNextRange() 同一套路。 */
 void Measure_RequestAutoRangeToggle(void);
 
+/* ==================== 状态机定义 ==================== */
+
+/* 全局操作状态（互斥） */
+typedef enum {
+    MEASURE_STATE_IDLE = 0,       /* 空闲 */
+    MEASURE_STATE_SWEEPING,       /* 频率扫描中 */
+    MEASURE_STATE_SWITCHING,      /* 切档中 */
+    MEASURE_STATE_MEASURING,      /* 等待 ADC 窗口中 */
+} MeasureState_t;
+
+/* 获取当前状态（用于调试） */
+MeasureState_t Measure_GetState(void);
+
 #ifdef __cplusplus
 }
 #endif

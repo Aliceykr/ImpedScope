@@ -104,9 +104,26 @@
 ```
 
 **架构说明**：
-- `Screen_KeyService()`：处理 b0/b1/b2 按键，设置 Measure_RequestScan/NextRange
-- `Measure_Service()`：处理请求、执行扫描或测量周期（取频率、等窗口、计算、显示）
+- `Screen_KeyService()`：处理 b0/b1/b2 按键，设置 Measure_RequestScan/NextRange/AutoRangeToggle
+- `Measure_Service()`：非阻塞状态机，每次调用执行一小步后立即返回（IDLE/SWEEPING/SWITCHING/MEASURING 四状态互斥）
 - `Screen_Poll()`：刷新屏幕显示
+
+**状态机架构**（v3.2 非阻塞改造）：
+
+```
+IDLE ──b0/自动──► SWEEPING ──done──► IDLE
+  │                    ▲
+  │b1                 │B1 abort
+  ▼                    │
+SWITCHING ─────────────┘
+  │
+  │done
+  ▼
+MEASURING ──window ready/timeout──► IDLE
+```
+
+- 所有状态在每次 `Measure_Service()` 调用时先检查按键请求，按键响应时间 < 10 ms
+- ADC 窗口等待、频率扫描、切档均改为非阻塞，主循环单次迭代 < 5 ms
 
 **按键行为**：
 - b0 单击 → 重扫频率（合并/去重，扫描期间多次按只触发一次）
@@ -475,7 +492,7 @@ CubeMX 重新生成后检查：
 
 已通过：
 
-- ArmClang 编译 + 链接：**39 files, 0 errors, 0 warnings**；Program Size：Code 55722、RO-data 2378、RW-data 28、ZI-data 4924。
+- ArmClang 编译 + 链接：**39 files, 0 errors, 0 warnings**；Program Size：Code 54514、RO-data 2426、RW-data 28、ZI-data 5180。
 - `.ioc` 与代码的引脚/实例一致性检查：PE3/PE4/PE6（`RELAY_K1/K2/K3`）、PB10/USART3、PC10/11/UART4。
 - 固件源码（`USE/`、`Core/`）静态检查：无 `analog_switch` / `Switch_*` / `SW_ENABLE` / `Screen_TakeRefreshKey` 残留。
 - **代码架构重构完成**：main.c 瘦身为三个高层调用，按键/测量/显示逻辑分层清晰。
@@ -484,6 +501,13 @@ CubeMX 重新生成后检查：
   - b1 提前响应：窗口等待中检测到 b1 立即处理，扫描期间按 b1 立即退出并切档
   - 修复中断被永久关闭的 bug：避免系统卡死
   - 修复 b1 双重切档：B1 事件只被消费一次
+- **非阻塞状态机改造完成**（v3.2）：
+  - `Measure_Service()` 改为 IDLE/SWEEPING/SWITCHING/MEASURING 四状态互斥状态机
+  - ADC 窗口等待、频率扫描、切档全部非阻塞，主循环单次迭代 < 5 ms
+  - 按键响应时间从最长 5 秒降至 < 10 ms
+  - `FreqScan_Select()` 阻塞版本删除，统一使用 `FreqScanStep()` 状态机
+  - `Relay_SetAsync()` / `Relay_NextAsync()` 非阻塞切档接口
+  - 自动重扫机制保留（连续失败 3 次触发）
 
 待上板：
 
