@@ -308,18 +308,26 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
 #if SPI_SLAVE_DEBUG_LEVEL >= 1
     uint32_t now = HAL_GetTick();
 
-    /* 处理中断里记录的错误事件（在临界区里读+清标志，避免竞态） */
+    /* 在临界区里一次性拷贝所有需要的数据（避免读到不一致的状态） */
     primask = __get_PRIMASK();
     __disable_irq();
     uint16_t err_flags = s_err_flags;
-    s_err_flags = 0u;
     uint8_t new_frame = s_new_frame_flag;
-    s_new_frame_flag = 0u;
+    uint16_t new_seq = s_new_frame_seq;
+    uint16_t new_fl = s_new_frame_fl;
+    uint32_t new_freq = s_new_frame_freq;
+    uint32_t new_mag = s_new_frame_mag;
+    int32_t  new_phi = s_new_frame_phi;
     uint8_t raw_ready = s_raw_ready;
-    s_raw_ready = 0u;
+    uint16_t raw_snapshot[SPI_SLAVE_FRAME_WORDS];
+    for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
+    {
+        raw_snapshot[i] = s_raw_snapshot[i];
+    }
     __set_PRIMASK(primask);
 
-    /* 打印错误（各自独立，不会互相覆盖） */
+    /* 打印错误（各自独立，不会互相覆盖）
+     * 只在真正打印后才清对应的 bit，避免节流窗口内的错误被吞 */
     if ((err_flags & SPI_ERR_HEAD) != 0u)
     {
         /* SPIERR head w0=XXXX slot=N（§13.3） */
@@ -328,6 +336,12 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
             s_err_last_tick[0] = now;
             UartDebug_Printf("SPIERR head w0=%04X slot=%u\r\n",
                              s_err_head_w0, s_err_head_slot);
+
+            /* 只在打印成功后才清标志 */
+            primask = __get_PRIMASK();
+            __disable_irq();
+            s_err_flags &= (uint16_t)~SPI_ERR_HEAD;
+            __set_PRIMASK(primask);
         }
     }
 
@@ -339,6 +353,12 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
             s_err_last_tick[1] = now;
             UartDebug_Printf("SPIERR crc seq=%u got=%04X exp=%04X\r\n",
                              s_err_crc_seq, s_err_crc_got, s_err_crc_exp);
+
+            /* 只在打印成功后才清标志 */
+            primask = __get_PRIMASK();
+            __disable_irq();
+            s_err_flags &= (uint16_t)~SPI_ERR_CRC;
+            __set_PRIMASK(primask);
         }
     }
 
@@ -350,6 +370,12 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
             s_err_last_tick[2] = now;
             UartDebug_Printf("SPIERR nvalid seq=%u fl=%u\r\n",
                              s_err_nvalid_seq, s_err_nvalid_fl);
+
+            /* 只在打印成功后才清标志 */
+            primask = __get_PRIMASK();
+            __disable_irq();
+            s_err_flags &= (uint16_t)~SPI_ERR_NVALID;
+            __set_PRIMASK(primask);
         }
     }
 
@@ -360,11 +386,17 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
         {
             s_err_last_tick[3] = now;
             UartDebug_Printf("SPIERR ovr n=%u\r\n", s_err_ovr_n);
+
+            /* 只在打印成功后才清标志 */
+            primask = __get_PRIMASK();
+            __disable_irq();
+            s_err_flags &= (uint16_t)~SPI_ERR_OVR;
+            __set_PRIMASK(primask);
         }
     }
 
-    /* 打印新帧（SPIRX/SPIRAW，所有数据来自同一帧，不会不同步） */
-    if (new_frame != 0u)
+    /* 打印新帧（SPIRX/SPIRAW，所有数据来自临界区拷贝的局部变量，保证一致性） */
+    if ((new_frame != 0u) && (raw_ready != 0u))
     {
 #if SPI_SLAVE_DEBUG_LEVEL >= 2
         /* SPIRX seq=XXX fl=X f=XXXX mag=XXXXXXXXX phi=XXXX（§13.3） */
@@ -375,32 +407,45 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
                 s_rx_last_print_tick = now;
                 s_rx_frames_printed++;
                 UartDebug_Printf("SPIRX seq=%u fl=%u f=%lu mag=%lu phi=%ld\r\n",
-                                 s_new_frame_seq, s_new_frame_fl,
-                                 (unsigned long)s_new_frame_freq,
-                                 (unsigned long)s_new_frame_mag,
-                                 (long)s_new_frame_phi);
+                                 new_seq, new_fl,
+                                 (unsigned long)new_freq,
+                                 (unsigned long)new_mag,
+                                 (long)new_phi);
             }
         }
 #endif
 
 #if SPI_SLAVE_DEBUG_LEVEL >= 3
         /* SPIRAW seq=XXX A55A XXXX ...（§13.3）
-         * 打印完整的 10 个原始字，用于逐字对拍 */
+         * 打印完整的 10 个原始字，用于逐字对拍
+         * 只在打印成功后才清 raw_ready，避免丢帧 */
         if ((now - s_raw_last_print_tick) >= SPI_SLAVE_DEBUG_RAW_PERIOD_MS)
         {
             if (s_raw_frames_printed < SPI_SLAVE_DEBUG_RAW_FRAMES)
             {
                 s_raw_last_print_tick = now;
                 s_raw_frames_printed++;
-                UartDebug_Printf("SPIRAW seq=%u", s_new_frame_seq);
+                UartDebug_Printf("SPIRAW seq=%u", new_seq);
                 for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
                 {
-                    UartDebug_Printf(" %04X", s_raw_snapshot[i]);
+                    UartDebug_Printf(" %04X", raw_snapshot[i]);
                 }
                 UartDebug_Printf("\r\n");
+
+                /* 只在打印成功后才清 raw_ready */
+                primask = __get_PRIMASK();
+                __disable_irq();
+                s_raw_ready = 0u;
+                __set_PRIMASK(primask);
             }
         }
 #endif
+
+        /* 清 new_frame_flag（在临界区外清，因为数据已经拷贝到局部变量） */
+        primask = __get_PRIMASK();
+        __disable_irq();
+        s_new_frame_flag = 0u;
+        __set_PRIMASK(primask);
     }
 
     /* 每秒统计（§13.3） */
