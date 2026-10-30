@@ -124,11 +124,23 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  static uint32_t last_heartbeat = 0;
   while (1)
   {
     Screen_KeyService();   /* 按键 → 请求重扫/切档/忽略 */
     Measure_Service();     /* 执行扫描或一次测量周期 */
     Screen_Poll();         /* 刷新屏幕 */
+
+    /* 定期调用 SPI 从机轮询，用于统计和链路检测 */
+    Spi_SlavePoll(NULL);
+
+    /* 每 2 秒输出心跳，方便确认串口是否工作 */
+    uint32_t now = HAL_GetTick();
+    if ((now - last_heartbeat) >= 2000u)
+    {
+      last_heartbeat = now;
+      UartDebug_Printf("HEARTBEAT tick=%lu\r\n", now);
+    }
   }
     /* USER CODE END WHILE */
 

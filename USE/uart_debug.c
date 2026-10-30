@@ -209,57 +209,23 @@ void UartDebug_LogMeasurement(const FRF_Point_t *point,
 
 void UartDebug_LogCompare(const FRF_Point_t *dft, const Spi_Frame_t *spi)
 {
-#if (CIR_DUT_TOPOLOGY == 1u)
-    /* 用 SPI 的 H 换算 Y，与 DFT 的 Y 比，输出一行差异（§6.3） */
-    double h_re, h_im, y_re, y_im, y_mag, y_phase;
-    double r = (double)CircuitID_GetFeedbackResistor();
+    /* FPGA top.v 提供频率与相对相位测值，与 ADC DFT 进行比对 */
+    int32_t df_hz = (int32_t)spi->frequency_hz - (int32_t)dft->frequency_hz;
+    int32_t dphi_mdeg = (int32_t)((spi->h_phase_deg - dft->h_phase_deg) * 1000.0f);
 
-    /* 除零保护：r 可能为 0 */
-    if (r <= 1e-12)
-    {
-        return;
-    }
-
-    /* H_spi = mag * exp(j*phi) */
-    h_re = (double)spi->h_mag * cos(spi->h_phase_deg * 3.14159265358979323846 / 180.0);
-    h_im = (double)spi->h_mag * sin(spi->h_phase_deg * 3.14159265358979323846 / 180.0);
-
-    /* Y_spi = -H_spi / R */
-    y_re = -h_re / r;
-    y_im = -h_im / r;
-
-    /* 转换为极坐标 */
-    y_mag = sqrt(y_re * y_re + y_im * y_im);
-    y_phase = atan2(y_im, y_re) * 180.0 / 3.14159265358979323846;
-
-    /* 计算偏差 */
-    double dft_y_mag = (double)dft->y_mag_siemens;
-    double dft_y_phase = (double)dft->y_phase_deg;
-
-    /* 除零保护 */
-    int32_t dY_permille = 0;
-    if (dft_y_mag > 1e-12)
-    {
-        dY_permille = (int32_t)((y_mag - dft_y_mag) / dft_y_mag * 1000.0);
-    }
-    int32_t dP_mdeg = (int32_t)((y_phase - dft_y_phase) * 1000.0);
-
-    /* 输出格式（全整数，符合现有 UartDebug_Printf 的支持范围） */
-    UartDebug_Printf("SPI f=%lu,seq=%u,magH_u=%lu,PHI_mdeg=%ld,Y_uS=%lu,P_mdeg=%ld,",
-                     (unsigned long)spi->frequency_hz,
+    /* 输出 FPGA 测值与 DFT 测值差异 */
+    UartDebug_Printf("COMPARE seq=%u,fpga_f=%lu,dft_f=%lu,df=%ld,fpga_phi=%ld,dft_phi=%ld,dphi_mdeg=%ld,p_cnt=%u,f0_cnt=%u,ok=%lu,err=%lu\r\n",
                      (unsigned)spi->seq,
-                     (unsigned long)(spi->h_mag * 1e6),
-                     (long)(spi->h_phase_deg * 1000.0),
-                     (unsigned long)(y_mag * 1e6),
-                     (long)(y_phase * 1000.0));
-
-    UartDebug_Printf("dY_permille=%ld,dP_mdeg=%ld,ok=%lu,err=%lu,ovr=%lu\r\n",
-                     (long)dY_permille,
-                     (long)dP_mdeg,
+                     (unsigned long)spi->frequency_hz,
+                     (unsigned long)dft->frequency_hz,
+                     (long)df_hz,
+                     (long)(spi->h_phase_deg * 1000.0f),
+                     (long)(dft->h_phase_deg * 1000.0f),
+                     (long)dphi_mdeg,
+                     (unsigned)spi->phase_cnt,
+                     (unsigned)spi->freq0_cnt,
                      (unsigned long)Spi_SlaveValidCount(),
-                     (unsigned long)Spi_SlaveErrorCount(),
-                     (unsigned long)Spi_SlaveOverrunCount());
-#endif /* CIR_DUT_TOPOLOGY == 1u */
+                     (unsigned long)Spi_SlaveErrorCount());
 }
 
 uint16_t UartDebug_DropCount(void)

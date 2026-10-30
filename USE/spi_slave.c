@@ -47,9 +47,12 @@ uint32_t Spi_SlaveOverrunCount(void)
  * 内部状态（§5.2）
  * ========================================================================== */
 
-/* DMA 目标缓冲：4 帧 × 10 字 = 40 个半字 = 80 字节。
- * 必须是 32 位对齐的静态数组，DMA 直接写这里（§11.6）。 */
-static uint16_t __attribute__((aligned(4))) s_dma_buf[SPI_SLAVE_FRAME_WORDS * SPI_SLAVE_FRAME_SLOTS];
+#define SPI_SLAVE_DMA_BYTES     (SPI_SLAVE_FRAME_BYTES * SPI_SLAVE_FRAME_SLOTS)
+#define SPI_SLAVE_HALF_BYTES    (SPI_SLAVE_DMA_BYTES / 2u)
+
+/* DMA 目标缓冲：SPI_SLAVE_FRAME_SLOTS 帧 × 10 字节，循环写入。
+ * 必须是 32 位对齐的静态数组，DMA 直接写这里。 */
+static uint8_t __attribute__((aligned(4))) s_dma_buf[SPI_SLAVE_DMA_BYTES];
 
 static volatile uint16_t s_valid_seq;       /* 最近一帧的 seq（中断写、主循环读） */
 static volatile uint8_t  s_have_new;        /* 有新帧 */
@@ -59,8 +62,11 @@ static volatile uint32_t s_error_count;
 static volatile uint32_t s_overrun_count;
 static Spi_Frame_t       s_latest;          /* 最近一帧解析结果 */
 
-/* 重同步状态 */
-static volatile uint8_t  s_consecutive_fail; /* 连续失败槽计数 */
+/* 字节流解析状态（只在 DMA 回调里改；重启 DMA 时在关中断下清零） */
+static volatile uint16_t s_rd;               /* 下一个待解析字节在 s_dma_buf 里的下标 */
+static volatile uint16_t s_avail;            /* 已写入但还没解析的字节数 */
+static volatile uint8_t  s_head_lost;        /* 当前处于"帧头失配"状态（一段只记一次错） */
+static uint32_t          s_last_restart_tick;
 
 /* 统计快照（用于计算 gap） */
 static volatile uint16_t s_last_valid_seq_snapshot;
@@ -93,8 +99,8 @@ static volatile uint32_t s_new_frame_freq;
 static volatile uint32_t s_new_frame_mag;
 static volatile int32_t  s_new_frame_phi;
 
-/* SPIRAW 快照（10 个字，20 字节） */
-static volatile uint16_t s_raw_snapshot[SPI_SLAVE_FRAME_WORDS];
+/* SPIRAW 快照（10 字节） */
+static volatile uint8_t s_raw_snapshot[SPI_SLAVE_FRAME_BYTES];
 static volatile uint8_t  s_raw_ready;
 
 /* ==========================================================================
@@ -120,38 +126,17 @@ static uint32_t s_raw_frames_printed;
 
 /* ==========================================================================
  * CRC-16/CCITT-FALSE
- * 初值 0xFFFF，多项式 0x1021，覆盖 word0..word8（§4.2）
- *
- * 注意：SPI 线上是 MSB first，但 Cortex-M7 是小端，内存里 0xA55A 是 5A A5。
- * 所以固件算 CRC 时必须按"线上字节顺序"（大端）喂数据，而不是内存序（小端）。
- * 这里先把每个 16 位字转成大端字节序，再算 CRC。
+ * 初值 0xFFFF，多项式 0x1021，覆盖前 9 字节（byte0..byte8）
+ * FPGA 按字节流发送，直接按字节序计算
  * ========================================================================== */
 
-static uint16_t CRC16_CCITT_False_BE(const uint16_t *words, uint32_t word_count)
+static uint16_t CRC16_CCITT_False(const uint8_t *data, uint32_t len)
 {
     uint16_t crc = 0xFFFF;
 
-    for (uint32_t i = 0u; i < word_count; i++)
+    for (uint32_t i = 0u; i < len; i++)
     {
-        uint8_t byte_hi = (uint8_t)((words[i] >> 8) & 0xFF);
-        uint8_t byte_lo = (uint8_t)(words[i] & 0xFF);
-
-        /* 处理高字节 */
-        crc ^= (uint16_t)((uint16_t)byte_hi << 8);
-        for (uint8_t bit = 0u; bit < 8u; bit++)
-        {
-            if ((crc & 0x8000u) != 0u)
-            {
-                crc = (uint16_t)((uint16_t)(crc << 1) ^ 0x1021u);
-            }
-            else
-            {
-                crc = (uint16_t)(crc << 1);
-            }
-        }
-
-        /* 处理低字节 */
-        crc ^= (uint16_t)((uint16_t)byte_lo << 8);
+        crc ^= (uint16_t)((uint16_t)data[i] << 8);
         for (uint8_t bit = 0u; bit < 8u; bit++)
         {
             if ((crc & 0x8000u) != 0u)
@@ -169,108 +154,150 @@ static uint16_t CRC16_CCITT_False_BE(const uint16_t *words, uint32_t word_count)
 }
 
 /* ==========================================================================
- * 帧解析（§5.3）—— 只在中断里调用，不做任何打印
+ * 字节流重同步解析（只在中断里调用，不做任何打印）
+ *
+ * FPGA 每帧 10 字节，但 DMA 启动/重启的时刻可能落在帧中间，缓冲里的帧边界
+ * 就和 10 字节槽错开（日志里 head w0=1234/5678/9ABC 就是整字节错位）。
+ * 所以不按固定槽切帧，而是在字节流里逐字节滑动找帧头：对上就吃掉 10 字节，
+ * 对不上就丢 1 字节再试。不再用 Abort + 重启 DMA 来对齐——重启落在帧中间
+ * 反而会制造新的错位。
  * ========================================================================== */
 
-static uint8_t Spi_SlaveParseSlot(const uint16_t *w)
+static uint8_t Spi_SlaveParseFrame(const uint8_t *f)
 {
-    uint8_t result = 0u;
+    uint16_t head = ((uint16_t)f[0] << 8) | f[1];
+    uint16_t tail = ((uint16_t)f[8] << 8) | f[9];
 
-    /* 校验帧头 */
-    if (w[0] != SPI_SLAVE_HEAD_MAGIC)
+    /* 同时校验帧头 (0x0708) 和帧尾 (0x0000) */
+    if ((head != SPI_SLAVE_HEAD_MAGIC) || (tail != SPI_SLAVE_TAIL_MAGIC))
     {
-        s_error_count++;
-        s_consecutive_fail++;
-
-        /* 记录 head 错误（独立槽位，不会被新帧覆盖） */
-        s_err_flags |= SPI_ERR_HEAD;
-        s_err_head_w0 = w[0];
-        s_err_head_slot = (uint16_t)s_consecutive_fail;
-        return 0u;
-    }
-
-    /* 校验 CRC（word9，覆盖 word0..word8）
-     * 注意：用大端字节序计算，与 FPGA 线上发送顺序一致 */
-    uint16_t crc_calc = CRC16_CCITT_False_BE(w, SPI_SLAVE_FRAME_WORDS - 1u);
-    if (crc_calc != w[SPI_SLAVE_FRAME_WORDS - 1u])
-    {
-        s_error_count++;
-        s_consecutive_fail++;
-
-        /* 记录 crc 错误（独立槽位） */
-        s_err_flags |= SPI_ERR_CRC;
-        s_err_crc_seq = w[1];
-        s_err_crc_got = w[9];
-        s_err_crc_exp = crc_calc;
-        return 0u;
-    }
-
-    /* 帧可信 */
-    s_consecutive_fail = 0u;
-
-    /* 填充 s_latest */
-    s_latest.seq = w[1];
-    s_latest.flags = w[2];
-    s_latest.frequency_hz = ((uint32_t)w[3] << 16) | w[4];
-    uint32_t mag_val = ((uint32_t)w[5] << 16) | w[6];
-    int32_t phi_val = (int32_t)(((uint32_t)w[7] << 16) | w[8]);
-
-    s_latest.h_mag = (float)mag_val / 1e6f;
-    s_latest.h_phase_deg = (float)phi_val / 1000.0f;
-    s_latest.tick = HAL_GetTick();
-
-    /* flags.bit0 == 1 才认为数据可用 */
-    if ((s_latest.flags & SPI_SLAVE_FLAG_VALID) != 0u)
-    {
-        s_valid_seq = s_latest.seq;
-        s_last_valid_tick = s_latest.tick;
-        s_valid_count++;
-        s_have_new = 1u;
-        result = 1u;
-
-        /* 记录新帧事件（所有数据放进事件槽位，避免与 s_latest 不同步） */
-        s_new_frame_flag = 1u;
-        s_new_frame_seq = s_latest.seq;
-        s_new_frame_fl = s_latest.flags;
-        s_new_frame_freq = s_latest.frequency_hz;
-        s_new_frame_mag = mag_val;
-        s_new_frame_phi = phi_val;
-
-        /* 保存原始字（供 SPIRAW 使用） */
-        for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
+        /* 一段连续失配只记一次错误，避免滑动期间把计数刷爆 */
+        if (s_head_lost == 0u)
         {
-            s_raw_snapshot[i] = w[i];
+            s_head_lost = 1u;
+            s_error_count++;
+            s_err_flags |= SPI_ERR_HEAD;
+            s_err_head_w0 = head;
+            s_err_head_slot = s_rd;
         }
-        s_raw_ready = 1u;
+        return 0u;
+    }
+
+    s_head_lost = 0u;
+
+    /* top.v 真实测量帧解析：
+     * [0..1] HEAD = 0x0708
+     * [2..3] PHASE (16-bit clk count)
+     * [4..5] FREQ0 (16-bit clk count)
+     * [6..7] FREQ1 (16-bit clk count)
+     * [8..9] TAIL = 0x0000
+     */
+    uint16_t phase_raw = ((uint16_t)f[2] << 8) | f[3];
+    uint16_t freq0_raw = ((uint16_t)f[4] << 8) | f[5];
+    uint16_t freq1_raw = ((uint16_t)f[6] << 8) | f[7];
+
+    /* 内部序号自增 */
+    static uint16_t s_internal_seq = 0;
+    s_internal_seq++;
+    s_latest.seq = s_internal_seq;
+    s_latest.phase_cnt = phase_raw;
+    s_latest.freq0_cnt = freq0_raw;
+    s_latest.freq1_cnt = freq1_raw;
+
+    /* 换算物理量：时钟 50MHz */
+    if (freq0_raw > 0u)
+    {
+        s_latest.frequency_hz = 50000000u / (uint32_t)freq0_raw;
+        float p_deg = (float)phase_raw * 360.0f / (float)freq0_raw;
+        if (p_deg > 180.0f)
+        {
+            p_deg -= 360.0f;
+        }
+        s_latest.h_phase_deg = p_deg;
+        s_latest.flags = SPI_SLAVE_FLAG_VALID | SPI_SLAVE_FLAG_FREQ_VALID;
     }
     else
     {
-        /* 只更新存活时间戳，不更新数值 */
-        s_last_valid_tick = s_latest.tick;
-
-        /* 记录 nvalid 错误（独立槽位） */
-        s_err_flags |= SPI_ERR_NVALID;
-        s_err_nvalid_seq = s_latest.seq;
-        s_err_nvalid_fl = s_latest.flags;
+        s_latest.frequency_hz = 0u;
+        s_latest.h_phase_deg = 0.0f;
+        s_latest.flags = 0u;
     }
 
-    return result;
+    /* 比较器无法测出线性幅值比，赋 1.0f */
+    s_latest.h_mag = 1.0f;
+    s_latest.tick = HAL_GetTick();
+
+    s_valid_seq = s_latest.seq;
+    s_last_valid_tick = s_latest.tick;
+    s_valid_count++;
+    s_have_new = 1u;
+
+    /* 记录新帧事件（所有数据放进事件槽位，避免与 s_latest 不同步） */
+    s_new_frame_flag = 1u;
+    s_new_frame_seq = s_latest.seq;
+    s_new_frame_fl = s_latest.flags;
+    s_new_frame_freq = s_latest.frequency_hz;
+    s_new_frame_mag = 1000000u;
+    s_new_frame_phi = (int32_t)(s_latest.h_phase_deg * 1000.0f);
+
+    /* 保存原始字节（供 SPIRAW 使用） */
+    for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_BYTES; i++)
+    {
+        s_raw_snapshot[i] = f[i];
+    }
+    s_raw_ready = 1u;
+
+    return 1u;
+}
+
+static void Spi_SlaveScan(void)
+{
+    uint8_t f[SPI_SLAVE_FRAME_BYTES];
+
+    while (s_avail >= SPI_SLAVE_FRAME_BYTES)
+    {
+        for (uint16_t i = 0u; i < SPI_SLAVE_FRAME_BYTES; i++)
+        {
+            f[i] = s_dma_buf[(s_rd + i) % SPI_SLAVE_DMA_BYTES];
+        }
+
+        if (Spi_SlaveParseFrame(f) != 0u)
+        {
+            s_rd = (uint16_t)((s_rd + SPI_SLAVE_FRAME_BYTES) % SPI_SLAVE_DMA_BYTES);
+            s_avail = (uint16_t)(s_avail - SPI_SLAVE_FRAME_BYTES);
+        }
+        else
+        {
+            s_rd = (uint16_t)((s_rd + 1u) % SPI_SLAVE_DMA_BYTES);
+            s_avail = (uint16_t)(s_avail - 1u);
+        }
+    }
+}
+
+/* 清解析状态并启动 DMA 循环接收（DMA 从缓冲区头开始写，所以下标也归零） */
+static HAL_StatusTypeDef Spi_StartDma(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_rd = 0u;
+    s_avail = 0u;
+    s_head_lost = 0u;
+    __set_PRIMASK(primask);
+
+    return HAL_SPI_Receive_DMA(&hspi1, s_dma_buf, SPI_SLAVE_DMA_BYTES);
 }
 
 /* ==========================================================================
- * DMA 回调（§5.3）—— 中断上下文，只做解析与计数，不打印（§11.8）
+ * DMA 回调 —— 中断上下文，只做解析与计数，不打印
  * ========================================================================== */
 
 void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if (hspi->Instance == SPI1)
     {
-        /* 处理前半缓冲（2 帧） */
-        for (uint8_t slot = 0u; slot < (SPI_SLAVE_FRAME_SLOTS / 2u); slot++)
-        {
-            const uint16_t *w = &s_dma_buf[slot * SPI_SLAVE_FRAME_WORDS];
-            Spi_SlaveParseSlot(w);
-        }
+        s_avail = (uint16_t)(s_avail + SPI_SLAVE_HALF_BYTES);
+        Spi_SlaveScan();
     }
 }
 
@@ -278,12 +305,8 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if (hspi->Instance == SPI1)
     {
-        /* 处理后半缓冲（2 帧） */
-        for (uint8_t slot = 0u; slot < (SPI_SLAVE_FRAME_SLOTS / 2u); slot++)
-        {
-            const uint16_t *w = &s_dma_buf[(SPI_SLAVE_FRAME_SLOTS / 2u + slot) * SPI_SLAVE_FRAME_WORDS];
-            Spi_SlaveParseSlot(w);
-        }
+        s_avail = (uint16_t)(s_avail + SPI_SLAVE_HALF_BYTES);
+        Spi_SlaveScan();
     }
 }
 
@@ -293,13 +316,12 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
     {
         s_overrun_count++;
 
-        /* 记录 ovr 错误（独立槽位） */
+        /* 记录 ovr 错误 */
         s_err_flags |= SPI_ERR_OVR;
         s_err_ovr_n = (uint16_t)s_overrun_count;
 
         /* 从机在 OVR/MODF 后会停，尝试重新启动 DMA */
-        (void)HAL_SPI_Receive_DMA(hspi, (uint8_t *)s_dma_buf,
-                                  SPI_SLAVE_FRAME_WORDS * SPI_SLAVE_FRAME_SLOTS);
+        (void)Spi_StartDma();
     }
 }
 
@@ -310,13 +332,12 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 void Spi_SlaveInit(void)
 {
 #if SPI_SLAVE_DEBUG_LEVEL >= 1
-    UartDebug_Printf("SPIINIT mode=slave w=%u crc=ccitt lvl=%u\r\n",
-                     SPI_SLAVE_FRAME_WORDS, SPI_SLAVE_DEBUG_LEVEL);
+    UartDebug_Printf("SPIINIT mode=slave bytes=%u crc=ccitt lvl=%u\r\n",
+                     SPI_SLAVE_FRAME_BYTES, SPI_SLAVE_DEBUG_LEVEL);
 #endif
 
     /* 启动 DMA 循环接收 */
-    if (HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)s_dma_buf,
-                            SPI_SLAVE_FRAME_WORDS * SPI_SLAVE_FRAME_SLOTS) != HAL_OK)
+    if (Spi_StartDma() != HAL_OK)
     {
         /* 启动失败，记录错误（但不影响 DFT 测量） */
         s_error_count++;
@@ -335,13 +356,10 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
      * 保存恢复 PRIMASK，避免被关中断上下文调用时强行开中断 */
     primask = __get_PRIMASK();
     __disable_irq();
-    if (s_have_new != 0u)
+    if ((s_have_new != 0u) && (out != NULL))
     {
-        if (out != NULL)
-        {
-            *out = s_latest;
-            result = 1u;
-        }
+        *out = s_latest;
+        result = 1u;
         s_have_new = 0u;
     }
     __set_PRIMASK(primask);
@@ -363,8 +381,8 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
     int32_t  new_phi = s_new_frame_phi;
 #endif
     uint8_t raw_ready = s_raw_ready;
-    uint16_t raw_snapshot[SPI_SLAVE_FRAME_WORDS];
-    for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
+    uint8_t raw_snapshot[SPI_SLAVE_FRAME_BYTES];
+    for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_BYTES; i++)
     {
         raw_snapshot[i] = s_raw_snapshot[i];
     }
@@ -374,11 +392,11 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
      * 只在真正打印后才清对应的 bit，避免节流窗口内的错误被吞 */
     if ((err_flags & SPI_ERR_HEAD) != 0u)
     {
-        /* SPIERR head w0=XXXX slot=N（§13.3） */
+        /* SPIERR head w0=XXXX pos=N（失配时的缓冲下标） */
         if ((now - s_err_last_tick[0]) >= SPI_SLAVE_ERR_PERIOD_MS)
         {
             s_err_last_tick[0] = now;
-            UartDebug_Printf("SPIERR head w0=%04X slot=%u\r\n",
+            UartDebug_Printf("SPIERR head w0=%04X pos=%u\r\n",
                              s_err_head_w0, s_err_head_slot);
 
             /* 只在打印成功后才清标志 */
@@ -460,9 +478,8 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
 #endif
 
 #if SPI_SLAVE_DEBUG_LEVEL >= 3
-        /* SPIRAW seq=XXX A55A XXXX ...（§13.3）
-         * 打印完整的 10 个原始字，用于逐字对拍
-         * 只在打印成功后才清 raw_ready，避免丢帧 */
+        /* SPIRAW seq=XXX AA 55 12 34 ...（打印原始字节）
+         * 打印完整的 10 个原始字节，用于逐字节对拍 */
         if ((now - s_raw_last_print_tick) >= SPI_SLAVE_DEBUG_RAW_PERIOD_MS)
         {
             if (s_raw_frames_printed < SPI_SLAVE_DEBUG_RAW_FRAMES)
@@ -470,9 +487,9 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
                 s_raw_last_print_tick = now;
                 s_raw_frames_printed++;
                 UartDebug_Printf("SPIRAW seq=%u", new_seq);
-                for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_WORDS; i++)
+                for (uint8_t i = 0u; i < SPI_SLAVE_FRAME_BYTES; i++)
                 {
-                    UartDebug_Printf(" %04X", raw_snapshot[i]);
+                    UartDebug_Printf(" %02X", raw_snapshot[i]);
                 }
                 UartDebug_Printf("\r\n");
 
@@ -527,16 +544,23 @@ uint8_t Spi_SlavePoll(Spi_Frame_t *out)
     }
 #endif
 
-    /* 重同步（§5.4）—— 不在调试宏里，量产也需要 */
-    if (s_consecutive_fail >= SPI_SLAVE_FRAME_SLOTS)
+    /* 兜底重启：字节错位已由滑动解析处理，这里只处理"很久没有有效帧"
+     * （比如 SPI 外设被 OVR/MODF 停掉）。必须在 NSS 为高（帧间空闲）时重启，
+     * 否则 SPE 在帧中间打开会从半个字节开始采样。 */
     {
+        uint32_t t = HAL_GetTick();
+
+        if (((int32_t)(t - s_last_valid_tick) >= (int32_t)SPI_SLAVE_RESTART_MS) &&
+            ((int32_t)(t - s_last_restart_tick) >= (int32_t)SPI_SLAVE_RESTART_MS) &&
+            (HAL_GPIO_ReadPin(GPIOG, GPIO_PIN_10) == GPIO_PIN_SET))
+        {
+            s_last_restart_tick = t;
 #if SPI_SLAVE_DEBUG_LEVEL >= 1
-        UartDebug_Printf("SPIERR resync fail=%u\r\n", s_consecutive_fail);
+            UartDebug_Printf("SPIERR restart dma\r\n");
 #endif
-        s_consecutive_fail = 0u;
-        HAL_SPI_Abort(&hspi1);
-        (void)HAL_SPI_Receive_DMA(&hspi1, (uint8_t *)s_dma_buf,
-                                  SPI_SLAVE_FRAME_WORDS * SPI_SLAVE_FRAME_SLOTS);
+            (void)HAL_SPI_Abort(&hspi1);
+            (void)Spi_StartDma();
+        }
     }
 
     return result;

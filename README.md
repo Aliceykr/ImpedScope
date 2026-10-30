@@ -1,6 +1,6 @@
 # STM32 黑盒电路频响辨识
 
-> 适用硬件：STM32H750XBH6，3.3 V 单电源 · 文档版本：v3.1（2026-10-28），按当前固件实现编写
+> 适用硬件：STM32H750XBH6，3.3 V 单电源 · 文档版本：2026-10-30，按当前源码、`.ioc`、Keil 工程和实际构建结果编写
 
 ## 1. 概述
 
@@ -37,7 +37,7 @@
 ### 2.2 数字部分
 
 - ADC1/ADC2 双 ADC 规则组同步采样，TIM6 TRGO 触发 300 kHz，CDR 打包 + DMA。
-- UART4（921600）驱动串口屏；USART3（PB10，921600，TX-only）输出调试日志。
+- UART4（921600）驱动串口屏：TX 阻塞发送，RX 单字节中断接收；USART3（921600）输出调试日志，应用层只使用 TX。
 - 调试口为 SWD（PA13/PA14），没有调试 UART 复用。
 - SPI1 配置为从机模式，通过 DMA 循环接收 FPGA 推送的测量帧，用于与 ADC+DFT 结果并行比对（见 §6）。
 
@@ -78,7 +78,7 @@
 | ADC1 | PA0_C | `ADC1_INP0`，模拟 | `Ui` |
 | ADC2 | PA1_C | `ADC2_INP1`，模拟 | `Uo` |
 | UART4 | PC10 / PC11 | AF8，921600 8N1 | 串口屏 TX/RX |
-| USART3 | PB10 | AF7，921600 8N1，TX-only | 调试日志 |
+| USART3 | PB10 / PB11 | AF7，921600 8N1，硬件 TX/RX 初始化；应用层 TX-only | 调试日志 |
 | 继电器 K1/K2/K3 | PE3 / PE4 / PE6 | GPIO 推挽输出 | 量程选择（上电默认 K2，b1 单击切档） |
 | TIM6 | 内部 | PSC=3，ARR=99 | 300 kHz TRGO |
 | SWD | PA13 / PA14 | Serial Wire | 调试/下载 |
@@ -86,7 +86,7 @@
 | LSE | PC14 / PC15 | 32.768 kHz | RTC 备选 |
 | SPI1 | PB5 / PG11 / PG9 | MOSI/SCK/MISO | 从机接收 FPGA 数据（PG10 = NSS） |
 
-- PB11 不使用（USART3 只配 TX）。
+- PB11 在硬件初始化中保留为 USART3_RX 复用脚，但应用层不调用 `HAL_UART_Receive_IT()` 或接收 DMA；USART3 实际只发送日志。
 - PA4 不分配（原 DDS 片选已释放）。
 - PG10 配置为 SPI1_NSS 硬件输入（FPGA 提供片选信号）。
 - 所有模拟输入为 0–3.3 V 单端，无负压。
@@ -107,7 +107,7 @@
 
 **架构说明**：
 - `Screen_KeyService()`：处理 b0/b1/b2 按键，设置 Measure_RequestScan/NextRange/AutoRangeToggle
-- `Measure_Service()`：非阻塞状态机，每次调用执行一小步后立即返回（IDLE/SWEEPING/SWITCHING/MEASURING 四状态互斥）
+- `Measure_Service()`：运行期非阻塞状态机，每次调用执行一小步后立即返回（IDLE/SWEEPING/SWITCHING/MEASURING 四状态互斥）
 - `Screen_Poll()`：刷新屏幕显示
 
 **状态机架构**（v3.2 非阻塞改造）：
@@ -125,10 +125,10 @@ MEASURING ──window ready/timeout──► IDLE
 ```
 
 - 所有状态在每次 `Measure_Service()` 调用时先检查按键请求，按键响应时间 < 10 ms
-- ADC 窗口等待、频率扫描、切档均改为非阻塞，主循环单次迭代 < 5 ms
+- 运行期 ADC 窗口等待、频率扫描、切档均为非阻塞，主循环单次迭代 < 5 ms；`Measure_Init()` 的首次扫描在启动路径中循环等待完成，这是初始化例外。
 
 **按键行为**：
-- b0 单击 → 重扫频率（合并/去重，扫描期间多次按只触发一次）
+- b0 单击 → 重扫频率（队列中尚未消费的重复 b0 合并为一个待处理事件）
 - b1 单击 → 切换继电器档位（1.5k → 15k → 150 → 循环）；自动量程开启时先关闭自动再切档
 - b2 单击 → 打开/关闭**自动量程**（见 §8.3），`t10` 末尾出现 ` A` 表示已开启
 
@@ -207,7 +207,7 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 ## 7. 自动选频
 
-`FreqScan_Select()` 在启动和按 b0 时执行：
+`FreqScanStep()` 在启动和按 b0 时推进扫描：
 
 - 候选顺序：`1 kHz, 10 kHz`；
 - 每个候选开一个窗口，算 `Ui` 的单频幅值 `ui_mag` 和相干性 `ui_coh`；
@@ -215,7 +215,7 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 - 取最高分；某档 `ui_coh > 0.95` 时提前结束；
 - 全部不合格时回到 1 kHz 并返回 0，主循环报 E04。
 
-选频只依赖 `Ui`，与反馈电阻无关；量程默认 1.5 kΩ，由 b1 单击手动切换，无需选档。`Measure_SetFrequency()` 可覆盖频率，范围 100–100000 Hz；外部源必须同步到当前频率。扫描两档约 0.11 s。
+选频只依赖 `Ui`，与反馈电阻无关；量程默认 1.5 kΩ，由 b1 单击手动切换，无需选档。`Measure_SetFrequency()` 可覆盖频率，范围 100–100000 Hz；外部源必须同步到当前频率。运行期扫描由 `Measure_Service()` 分步推进，扫描期间 b1 可中止扫描；两档扫描的采样等待总时长约 0.11 s，但不会在一次主循环调用中阻塞。
 
 ## 8. 继电器量程（三档，上电默认 1.5 kΩ）
 
@@ -236,7 +236,7 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 
 - `MX_GPIO_Init()`（CubeMX 生成）配 PE3/PE4/PE6 为推挽输出并写低；`Relay_Init()` 只做上电时序：三路全低（断开）→ 等 10 ms 释放 → 只把 PE4 拉高（K2 = 1.5 kΩ）→ 等 10 ms 吸合。
 - `CircuitID_SetFeedbackResistor(Relay_GetOhm())` 同步固定 `R_eff = 1500 Ω`，与 `s_calib`（Rf=1500）和 `CIR_FEEDBACK_RESISTOR_OHM` 对齐。
-- **不做自动量程**（默认）；运行期切档由 b1 单击触发（`Relay_Set()`/`Relay_Next()`，1.5k → 15k → 150 → 1.5k 循环）。b2 可打开自动量程，见 §8.3。
+- **不做自动量程**（默认）；运行期切档由 b1 单击触发（`Relay_NextAsync()`，1.5k → 15k → 150 → 1.5k 循环）。b2 可打开自动量程，见 §8.3。
 - 上电三路全断到 K2 闭合之间 TIA 开环、`Uo` 可能撞轨；`Relay_Init()` 在 `ADC_Sampler_Init()` 之前完成，不会采到无效窗口。
 
 ### 8.3 自动量程（b2 开关）
@@ -252,7 +252,7 @@ Uo 峰值 = 0.5 V × 1.571 ≈ 0.785 V（不削顶）
 - `Uo` 低于 `MEASURE_AR_MIN_CODE`（4 码）视为没有信号，不参与选档，交给 `CircuitID_Compute()` 报 E05。
 - 三档都放不下（`|Y|` > 约 12 mS 或 < 约 20 µS）时选最接近的档继续测，E19/E20/E05 照常上报，自动模式保持开启。
 - 自动模式下按 b1：**先关闭自动，再切到下一档**（手动接管）。
-- 复位后自动关闭、回到 1.5 kΩ；切档本身阻塞约 20 ms 并丢弃当前窗口。
+- 复位后自动关闭、回到 1.5 kΩ；运行期切档使用 `Relay_NextAsync()`，先释放、等待 10 ms，再吸合目标档并等待 10 ms。两个等待阶段由 `SWITCHING` 状态分散到多次主循环调用中，不阻塞主循环；切档完成后丢弃当前窗口并重新启动采样。
 
 ## 9. SPI 从机与双路并行（FPGA 数据接收）
 
@@ -355,7 +355,7 @@ FPGA 实现时：每个 16 位字先发高字节、再发低字节，CRC 按这�
 
 ## 10. 串口屏（UART4）
 
-- UART4，**921600 8N1**，PC10 TX / PC11 RX，DMA/中断均不使用，阻塞发送。
+- UART4，**921600 8N1**，PC10 TX / PC11 RX。TX 使用 `HAL_UART_Transmit()` 阻塞发送；RX 使用 `HAL_UART_Receive_IT()` 单字节中断接收；DMA 不使用。
 - 每 500 ms 发一整帧 `t0`–`t10`，每条 `控件名.txt="值"` + `FF FF FF`；条间留 2 ms 给 HMI 重绘。
 - 屏幕只显示，频率由固件自动选择；b0 单击 = 强制重扫，b1 单击 = 切换继电器档位，b2 单击 = 自动量程开关。
 
@@ -375,19 +375,20 @@ FPGA 实现时：每个 16 位字先发高字节、再发低字节，CRC 按这�
 
 - `t1`–`t4` 依赖 `CIR_DUT_TOPOLOGY=1`；设为 0（只算 H）时这四行固定显示 `-`。
 - 阶段顺序：`BOOT → CLK → PERIPH → MODULE → SCAN → LOOP`；`BOOT`/`CLK` 在 UART 就绪前，屏幕不可见；`PERIPH` 起可见，且保持约 150 ms。
-- 按键协议为**单字节**（`0x01`/`0x02`/`0x03`），UART 中断直接映射成事件入队，`Screen_PollKey()` 每轮出队一个，DFT 窗口阻塞 1 s 时按键不丢：
+- 按键协议为**单字节**（`0x01`/`0x02`/`0x03`），UART4 接收中断直接映射成事件入队，`Screen_PollKey()` 每轮出队一个；运行期即使正在等待 DFT 窗口，按键也保留在队列中，不依赖阻塞式扫描：
   - b0：`0x01`（`printh 01`）：单击强制重扫频率，档位不变；
-  - b1：`0x02`（`printh 02`）：单击切换继电器档位（1.5k → 15k → 150 → 1.5k），频率不变；切档后调用 `CircuitID_SetFeedbackResistor()` / `Screen_ClearResult()` / `Screen_ClearError()` / `Screen_FlushRange()` / `ADC_Sampler_Restart()`，不调用 `FreqScan_Select()`；
+  - b1：`0x02`（`printh 02`）：单击切换继电器档位（1.5k → 15k → 150 → 1.5k），频率不变；切档由 `Relay_NextAsync()` 推进，完成后调用 `CircuitID_SetFeedbackResistor()` / `Screen_ClearResult()` / `Screen_ClearError()` / `Screen_FlushRange()` / `ADC_Sampler_Restart()`；
   - b2：`0x03`（`printh 03`）：单击打开/关闭自动量程（`t10` 末尾出现/去掉 ` A`）。
-- 100 ms 锁定期：同一次点击里重复发同一字节（如 `03 03 03`）只会算一次，所以 HMI 沿用三字节发送也能工作；但**不要混发不同字节**（如 `01 01 02`）——第一个字节会先被当成 b0。
-- b0 额外做合并/去重：扫描期间连按多次只触发一次重扫。
+- 100 ms 防抖窗口从上一次通过识别的按键事件开始计时：小于 100 ms 的重复事件丢弃，达到 100 ms 的新事件允许通过；因此同一次点击里的重复字节（如 `03 03 03`）通常只算一次，但**不要混发不同字节**（如 `01 01 02`）作为一组协议。
+- b0 额外做合并/去重：尚未出队时只保留一个待处理事件；事件出队时清除 pending 标志，因此后续 b0 仍可再次触发重扫。
 - b1 只在按下事件发送一次；HMI 释放事件必须为空，否则一次点击会触发两次。
 - 档位在 `t10` 显示为 `R:150 / R:1.5k / R:15k`；切档时 `Screen_FlushRange()` 立即补发 `t10`，不等 500 ms 整帧。`Screen_SetActiveFreq()` 只更新当前频率、清上一频率结果并强制下一帧刷新。
 
 ## 10. 调试串口（USART3）
 
-- **USART3，PB10 TX（AF7），921600 8N1，TX-only**；PB11 不使用。
-- 中断优先级 **5**（UART4/ADC/DMA 为 0），不抢占采样窗口。
+- **USART3，PB10 TX / PB11 RX（AF7），921600 8N1**；硬件初始化为 TX/RX，但应用层只调用 `HAL_UART_Transmit_IT()`，不启动 USART3 接收流程，因此 PB11 浮空不会形成应用层 RXNE 接收中断路径。
+- 当前实际 NVIC 配置为：`USART3_IRQn=(0,0)`、`UART4_IRQn=(0,0)`、`SPI1_IRQn=(0,0)`、`DMA1_Stream2_IRQn=(0,0)`、`DMA1_Stream1_IRQn=(0,0)`、`DMA1_Stream0_IRQn=(1,0)`；ADC 错误中断在运行时设置为 `ADC_IRQn=(5,0)`。这与“USART3=5、DMA=0”的设计意图并不完全一致，属于优先级配置未完全落地，当前没有证据表明会静默破坏 DFT。
+- `DMA_PRIORITY_LOW` 是 DMA 控制器内部优先级，不等同于 NVIC 抢占优先级。
 - 发送：1024 字节环形缓冲 + `HAL_UART_Transmit_IT()`；主循环只拷贝，不阻塞；缓冲满整行丢弃并计数。
 - 速率：每次有效测量一行，最小间隔 `UART_DEBUG_MIN_INTERVAL_MS = 200 ms`（5 Hz）。
 - 只发不收，没有下行命令；标定写入/表格导出仍需另加协议。
@@ -429,7 +430,7 @@ BOOT 9_30 debug uart 921600
 - 双 ADC 规则组同步模式（`ADC_DUALMODE_REGSIMULT`），16 位，`32_10_BITS` 打包。
 - TIM6 TRGO 上升沿同时启动两路；PSC=3、ARR=99、120 MHz → **300 kHz**。
 - 采样时间 **1.5 个 ADC 周期**（37.5 MHz 下 40 ns）；16 位转换 8.5 周期，总计约 267 ns，远小于 3.33 µs 触发周期。
-- ADC 时钟 PLL2 75 MHz / 2 = **37.5 MHz**。
+- ADC 时钟 PLL2 75 MHz / 2 = **37.5 MHz**。HSE=25 MHz 时，PLL2 输入为 `25/2=12.5 MHz`，VCO 为 `12.5×12=150 MHz`，P/Q/R 输出均为 75 MHz。
 - 只有 ADC1 的 DMA（DMA1_Stream2，32 位字、循环）搬运 CDR；ADC2 的 DMA 配置保留但同步模式下不启动。
 - 每半个缓冲区 64 对样本回调一次。
 
@@ -451,7 +452,13 @@ BOOT 9_30 debug uart 921600
 
 改采样率时必须同时改 TIM6 的 PSC/ARR 和 `ADC_SAMPLER_RATE_HZ`，否则 DFT 频率轴静默错位。
 
-### 11.5 削波检测
+### 11.5 DMA 内存位置与中断优先级
+
+- 当前命令行构建使用的 scatter file 将 RW/ZI 分配到 `RW_IRAM1=0x20000000`（DTCM）和 `RW_IRAM2=0x24000000`（AXI SRAM）。
+- 实际 armlink map 中，ADC 双缓冲 `adc_pair_buf` 位于 `0x24000084`，SPI DMA 缓冲 `s_dma_buf` 位于 `0x240007e4`，均在 AXI SRAM；本次构建的 DTCM 区没有放入这些关键 DMA 缓冲。
+- 结论：当前不存在“DMA buffer 落在 DTCM、DMA1 不可达”的问题，不需要因此修改硬件或强行增加 section 属性。
+- PLL2 VCO 当前为 **150 MHz**，处于 HAL 注释给出的 `RCC_PLL2VCOMEDIUM` 范围 `150–420 MHz` 的下边界；代码计算和当前 HAL 范围允许。仍建议上板时结合目标芯片数据手册、温度和电源条件确认锁定稳定性，当前不据此修改配置。
+### 11.6 削波检测
 
 - 统计窗口内贴边样本：码值 `≤ CIR_CLIP_LOW_CODES (64)` 或 `≥ CIR_CLIP_HIGH_CODES (65471)`；
 - 贴边比例 > `CIR_CLIP_MAX_PERMILLE (1%)` → `Ui` 报 E19、`Uo` 报 E20；
@@ -477,7 +484,7 @@ BOOT 9_30 debug uart 921600
 | `RELAY_COUNT` | `relay_range.h` | 3 | 继电器档位数 |
 | `RELAY_DEFAULT_INDEX` | `relay_range.h` | 1 | 默认档（K2 = 1.5 kΩ） |
 | `RELAY_SETTLE_MS` / `RELAY_RELEASE_MS` | `relay_range.h` | 10 / 10 | 吸合建立 / 释放等待（ms） |
-| `Relay_Set()` / `Relay_Next()` | `relay_range.h` | — | 切档 / 切到下一档（b1 单击触发） |
+| `Relay_SetAsync()` / `Relay_NextAsync()` | `relay_range.h` | — | 运行期非阻塞切档 / 切到下一档（b1 单击触发） |
 | `MEASURE_AR_TARGET_V` | `measure.h` | 0.8 | 自动量程目标 `Uo` 峰值（半量程） |
 | `MEASURE_AR_MAX_V` | `measure.h` | 1.5 | 自动量程允许的最大预测 `Uo`（超过就判为会削顶） |
 | `MEASURE_AR_MIN_CODE` | `measure.h` | 4.0 | 低于此码值视为没信号，不参与选档 |
@@ -535,7 +542,7 @@ phase_deg = angle(H_thru)
 | E08 | CIR_H_LOW | `measure.c` | `\|H\| < CIR_H_MIN_MAG` | 非致命 |
 | E09 | CIR_ZY_NAN | `measure.c` | Z/Y 非有限 | 非致命 |
 | E10 | UART_TX | `screen.c` | UART4 发送失败 | 非致命 |
-| E11 | UART_BUSY | — | 保留：当前 UART4 用阻塞发送，不触发 | — |
+| E11 | UART_BUSY | — | 保留：当前 UART4 TX 为阻塞发送，不走忙状态错误路径 | — |
 | E12 | WINDOW_TIMEOUT | `main.c` | 等 ADC 窗口超时 | 非致命 |
 | E13 | — | — | 已停用，保留编号 | — |
 | E14 | CIR_UI_INCOH | `measure.c` | `Ui` 非单频（kappa < 0.2） | 非致命 |
@@ -557,10 +564,10 @@ phase_deg = angle(H_thru)
 - **自动选频耗时**：扫描两档约 0.11 s。
 - **外部源频率/直流不在固件控制内**：源频率偏离会导致 κ 下降/相位误差；源直流中点必须是 1.65 V，否则 DUT 上会有 1.65 V 直流，TIA 可能饱和。
 - **幅值门限是占位值**：`CIR_INPUT_MIN_AMP`/`CIR_OUTPUT_MIN_AMP = 4` 码，需按实际噪声调整。
-- **调试串口只发不收**：USART3 TX-only，没有下行命令。
+- **调试串口只发不收**：USART3 应用层只使用 TX，没有下行命令；PB11 虽保留硬件 RX 复用，但未启动接收流程。
 - **档位在 t10 显示**：`R:150 / R:1.5k / R:15k`（当前档，切档后立即更新）；更细的 `R_eff` 可从 USART3 日志的 `range`/`R_ohm` 看。
 - **两路增益/相位只标了 1.5 kΩ 档**：默认档 `s_calib` 直接适用；b1 切到 150 Ω / 15 kΩ 档后绝对值只可信到相对变化，需按档重标。
-- **扫描期间按键**：`FreqScan_Select()` 需数秒，期间按键事件排入队列，待扫描结束、先用旧档测出一个结果后下一轮才处理——屏幕上可能先闪一个新读数再被清掉，属正常时序，不影响最终结果。
+- **扫描期间按键**：运行期扫描由 `FreqScanStep()` 分步推进，b1 可中止扫描并切档；尚未出队的重复 b0 会合并为一个待处理事件。
 
 ## 16. 编译与维护
 
@@ -594,20 +601,21 @@ CubeMX 重新生成后检查：
 
 已通过：
 
-- ArmClang 编译 + 链接：**39 files, 0 errors, 0 warnings**；Program Size：Code 54514、RO-data 2426、RW-data 28、ZI-data 5180。
+- ArmClang 命令行编译 + 链接：**40 个源文件，0 个编译/链接错误**；Program Size：Code=58826、RO-data=2542、RW-data=28、ZI-data=5540。构建过程中有 legacy armasm deprecated 提示，不影响生成固件。
+- `.ccg-build/verify.sh` 全量检查通过（PASS），包括 40 个源文件、当前 scatter 内存布局、关键外设配置和生成代码一致性检查。
 - `.ioc` 与代码的引脚/实例一致性检查：PE3/PE4/PE6（`RELAY_K1/K2/K3`）、PB10/USART3、PC10/11/UART4。
 - 固件源码（`USE/`、`Core/`）静态检查：无 `analog_switch` / `Switch_*` / `SW_ENABLE` / `Screen_TakeRefreshKey` 残留。
 - **代码架构重构完成**：main.c 瘦身为三个高层调用，按键/测量/显示逻辑分层清晰。
 - **按键处理优化完成**：
-  - b0 合并/去重：扫描期间多次按 b0 只触发一次扫描
+  - b0 合并/去重：尚未出队的 b0 事件合并；事件出队后 pending 清除，后续按键仍可触发新的重扫
   - b1 提前响应：窗口等待中检测到 b1 立即处理，扫描期间按 b1 立即退出并切档
   - 修复中断被永久关闭的 bug：避免系统卡死
   - 修复 b1 双重切档：B1 事件只被消费一次
-- **非阻塞状态机改造完成**（v3.2）：
+- **非阻塞状态机改造完成**：
   - `Measure_Service()` 改为 IDLE/SWEEPING/SWITCHING/MEASURING 四状态互斥状态机
   - ADC 窗口等待、频率扫描、切档全部非阻塞，主循环单次迭代 < 5 ms
   - 按键响应时间从最长 5 秒降至 < 10 ms
-  - `FreqScan_Select()` 阻塞版本删除，统一使用 `FreqScanStep()` 状态机
+  - 运行期不再使用 `FreqScan_Select()`，统一使用 `FreqScanStep()` 状态机
   - `Relay_SetAsync()` / `Relay_NextAsync()` 非阻塞切档接口
   - 自动重扫机制保留（连续失败 3 次触发）
 

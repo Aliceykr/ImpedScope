@@ -107,7 +107,7 @@ void Screen_RequestBeatReset(void);
 /* 检查是否有待处理的 b0 重扫请求（非破坏性读取）。 */
 uint8_t Screen_IsB0Pending(void);
 
-/* 清除 b0 待处理标志（主循环开始处理 b0 时调用）。 */
+/* 清除 b0 合并标志；正常出队时由 Screen_PollKey() 自动清除。 */
 void Screen_ClearB0Pending(void);
 
 /* 按键服务：处理 b0/b1/b2 按键，设置相应的请求标志 */

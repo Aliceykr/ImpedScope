@@ -18,12 +18,14 @@ extern "C" {
  * 没接 FPGA / 不想看到 E21 时改成 0 即可，measure.c 和 uart_debug.c 无需改动。 */
 #define SPI_SLAVE_ENABLE            1u
 
-/* 帧格式常量（与 PLAN-SPI从机与双路并行.md §4 保持一致） */
-#define SPI_SLAVE_FRAME_WORDS       10u    /* 每帧 16 位字数 */
+/* 帧格式常量（匹配 FPGA：10 字节，8-bit 字节流） */
+#define SPI_SLAVE_FRAME_BYTES       10u    /* 每帧字节数 */
 #define SPI_SLAVE_FRAME_SLOTS       4u     /* DMA 循环缓冲能放几帧 */
 #define SPI_SLAVE_ALIVE_MS          200u   /* 超过这么久没有有效帧 → 认为链路断了 */
+#define SPI_SLAVE_RESTART_MS        500u   /* 超过这么久没有有效帧 → 兜底重启 DMA（仅 NSS 为高时） */
 
-#define SPI_SLAVE_HEAD_MAGIC        0xA55Au /* 帧头 */
+#define SPI_SLAVE_HEAD_MAGIC        0x0708u /* 帧头：top.v 真实测量帧先发 0x07 后发 0x08 */
+#define SPI_SLAVE_TAIL_MAGIC        0x0000u /* 帧尾：top.v 停止字 0x0000 */
 
 /* 帧 flags 位定义 */
 #define SPI_SLAVE_FLAG_VALID        (1u << 0)   /* 本帧有效 */
@@ -38,7 +40,7 @@ extern "C" {
  * 1 = 初始化 + 错误 + 每秒统计（默认，稳态约 1 行/秒）
  * 2 = 额外按时间节流打印 SPIRX（联调首选用这个）
  * 3 = 再额外按时间节流 dump SPIRAW 原始字（查字对齐/CS/位序） */
-#define SPI_SLAVE_DEBUG_LEVEL       1u
+#define SPI_SLAVE_DEBUG_LEVEL       2u
 
 /* 限速：两条都按"最小间隔"节流，与帧率无关 */
 #define SPI_SLAVE_DEBUG_RX_PERIOD_MS    100u   /* SPIRX 最快 10 行/秒 ≈ 560 B/s */
@@ -56,11 +58,14 @@ extern "C" {
  * ========================================================================== */
 typedef struct
 {
-    uint16_t seq;            /* 帧序号 */
+    uint16_t seq;            /* 内部帧计数 (由驱动维护自增) */
     uint16_t flags;          /* 标志位 */
-    uint32_t frequency_hz;   /* 频率 Hz */
-    float    h_mag;          /* 线性幅值 |H| */
-    float    h_phase_deg;    /* 度 */
+    uint32_t frequency_hz;   /* 频率 Hz (50MHz / freq0_cnt) */
+    float    h_mag;          /* 线性幅值 |H|（比较器测不出来，置 1.0 或由比对模块赋值） */
+    float    h_phase_deg;    /* 相对相位度 (-180.0 ~ +180.0) */
+    uint16_t phase_cnt;      /* FPGA 原始相位计数 (clk拍数) */
+    uint16_t freq0_cnt;      /* FPGA 通道0周期计数 (clk拍数) */
+    uint16_t freq1_cnt;      /* FPGA 通道1周期计数 (clk拍数) */
     uint32_t tick;           /* 收到该帧时的 HAL_GetTick() */
 } Spi_Frame_t;
 

@@ -116,11 +116,9 @@ void Screen_Init(void)
     s_last_error_code = 0u;
     s_fatal_latched = 0u;
     s_fatal_code = SCREEN_E01_HAL_INIT;   /* 默认覆盖 MX_*_Init 内的 Error_Handler */
-    /* 置 0 而不是 HAL_GetTick()：锁定期判定是"距上次入队不足 100 ms 就丢"，
-     * 若初始化成当前 tick，则初始化后 100 ms 内的第一次按键必被丢弃。
-     * 置 0 时 HAL_GetTick 上电后从 0 递增，第一个按键必然通过；
-     * 32 位回绕后 (uint32_t)(now - 0) 仍是正确的小值。 */
-    s_rx_lockout_tick = 0u;
+    /* 保存上次通过防抖的时刻。向前预置 100 ms，确保启动后的首次按键
+     * 立即通过；无符号差值计算也兼容 HAL tick 回绕。 */
+    s_rx_lockout_tick = HAL_GetTick() - 100u;
     s_key_head = 0u;
     s_key_tail = 0u;
     s_key_dropped = 0u;
@@ -369,6 +367,11 @@ Screen_KeyEvent_t Screen_PollKey(void)
         {
             s_key_tail = 0u;
         }
+        if (event == SCREEN_KEY_B0)
+        {
+            /* 出队与清标志原子完成，防止 ISR 在两步之间误认为 B0 仍待处理。 */
+            Screen_ClearB0Pending();
+        }
     }
 
     __set_PRIMASK(primask);
@@ -415,8 +418,9 @@ static void Screen_KeyEnqueue(Screen_KeyEvent_t event, uint32_t now)
 
     if ((uint32_t)(now - s_rx_lockout_tick) < 100u)
     {
-        return;                    /* 100 ms 锁定期内：同一帧/同一次点击不重复触发 */
+        return;                    /* 距上次识别按键不足 100 ms：忽略触点抖动 */
     }
+    s_rx_lockout_tick = now;
 
     /* B0 事件到达时立即请求 beat 复位（不等主循环处理） */
     if (event == SCREEN_KEY_B0)
@@ -431,7 +435,6 @@ static void Screen_KeyEnqueue(Screen_KeyEvent_t event, uint32_t now)
     if ((event == SCREEN_KEY_B0) && (s_b0_pending != 0u))
     {
         __set_PRIMASK(primask);
-        s_rx_lockout_tick = now + 100u;
         return;                    /* 已有待处理的 b0，只复位 beat，不入队 */
     }
 
@@ -440,7 +443,6 @@ static void Screen_KeyEnqueue(Screen_KeyEvent_t event, uint32_t now)
     {
         s_key_dropped++;
         __set_PRIMASK(primask);
-        s_rx_lockout_tick = now + 100u;
         return;                    /* 队列满，丢弃事件 */
     }
 
@@ -459,7 +461,6 @@ static void Screen_KeyEnqueue(Screen_KeyEvent_t event, uint32_t now)
     }
 
     __set_PRIMASK(primask);
-    s_rx_lockout_tick = now + 100u;
 }
 
 /* b0/b1/b2 按键协议:单字节
@@ -493,8 +494,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF |
                                      UART_CLEAR_FEF | UART_CLEAR_PEF);
-        /* 同样置 0:置 HAL_GetTick() 会让出错后 100 ms 内的按键被丢掉。 */
-        s_rx_lockout_tick = 0u;
+        /* UART 恢复后允许下一次按键立即通过防抖。 */
+        s_rx_lockout_tick = HAL_GetTick() - 100u;
         Screen_RxStart();
     }
     else if (huart->Instance == USART3)
@@ -813,7 +814,7 @@ void Screen_KeyService(void)
 
     if (event == SCREEN_KEY_B0)
     {
-        /* B0：通知 measure 层重扫
+        /* B0：通知 measure 层重扫。
          * beat 复位已在 Screen_KeyEnqueue() 中设置 s_beat_reset_pending */
         Measure_RequestScan();
     }
