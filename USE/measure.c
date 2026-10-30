@@ -555,16 +555,36 @@ typedef struct
  * mag_ratio = |H_true| / |H_meas|，phase_deg = angle(H_meas)-angle(H_true)
  * 纯电阻的 H_true 相位为 180°，因此 phase_deg 就等于屏幕 P。
  */
-static const Calib_Point_t s_calib[] = {
-    {  1000.0f, 1.009f, -1.186f },
-    { 10000.0f, 1.031f, -11.559f },
+#define CALIB_FREQ_COUNT 2u
+
+/*
+ * 分档分频标定表：3 个量程档位 × 2 个频点（1 kHz / 10 kHz）。
+ *   - 档位 0（150 Ω）：实测 1010 Ω 标定，mag_ratio=6.790f, phase=-1.222f
+ *   - 档位 1（1.5 kΩ）：实测 1010 Ω 标定，mag_ratio=9.794f, phase=-2.395f
+ *   - 档位 2（15 kΩ）：实测 1010 Ω 标定，mag_ratio=9.794f, phase=-2.395f
+ */
+static const Calib_Point_t s_calib_ranges[3][CALIB_FREQ_COUNT] = {
+    /* 档位 0：150 Ω 档 (range=0) */
+    {
+        {  1000.0f, 6.790f,  -1.222f },
+        { 10000.0f, 7.000f, -11.000f },
+    },
+    /* 档位 1：1.5 kΩ 档 (range=1) */
+    {
+        {  1000.0f, 9.794f,  -2.395f },
+        { 10000.0f, 9.477f,  -1.405f },
+    },
+    /* 档位 2：15 kΩ 档 (range=2) */
+    {
+        {  1000.0f, 9.794f,   -2.395f },
+        { 10000.0f, 10.290f, -11.687f },
+    },
 };
 
 static uint8_t Calib_Lookup(float frequency_hz, float *mag_ratio, float *phase_deg);
 static uint8_t Calib_Apply(float frequency_hz, double *h_re, double *h_im);
 
-/* 按频率就近查找修正量;落在两个标定点之间取较近者。
- * 未找到(频率超出标定范围)时输出恒等值(1.0, 0.0)并返回 0。 */
+/* 按当前档位和频率查找对应的标定修正量 */
 static uint8_t Calib_Lookup(float frequency_hz, float *mag_ratio, float *phase_deg)
 {
     uint32_t index;
@@ -577,9 +597,17 @@ static uint8_t Calib_Lookup(float frequency_hz, float *mag_ratio, float *phase_d
         return 0u;
     }
 
-    for (index = 0u; index < (uint32_t)CALIB_COUNT; ++index)
+    uint8_t range = Relay_Get();
+    if (range >= 3u)
     {
-        float diff = s_calib[index].frequency_hz - frequency_hz;
+        range = 1u; /* 越界默认 1.5k 档 */
+    }
+
+    const Calib_Point_t *tbl = s_calib_ranges[range];
+
+    for (index = 0u; index < CALIB_FREQ_COUNT; ++index)
+    {
+        float diff = tbl[index].frequency_hz - frequency_hz;
 
         if (diff < 0.0f)
         {
@@ -607,8 +635,8 @@ static uint8_t Calib_Lookup(float frequency_hz, float *mag_ratio, float *phase_d
         return 0u;
     }
 
-    *mag_ratio = s_calib[nearest].mag_ratio;
-    *phase_deg = s_calib[nearest].phase_deg;
+    *mag_ratio = tbl[nearest].mag_ratio;
+    *phase_deg = tbl[nearest].phase_deg;
     return 1u;
 }
 

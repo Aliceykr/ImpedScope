@@ -106,7 +106,7 @@ uint8_t Measure_SetFrequency(uint32_t frequency_hz);
  * 不要为提高平均深度把 CYCLES 抬到窗口时长接近该超时值,那会让每个窗口都报 E12。
  *
  * 注意:WINDOW_MIN 仅作安全下限,对 1 kHz 不生效。 */
-#define ADC_SAMPLER_WINDOW_CYCLES    100u
+#define ADC_SAMPLER_WINDOW_CYCLES    500u
 #define ADC_SAMPLER_WINDOW_MIN       256u
 #define ADC_SAMPLER_WINDOW_MAX       400000u
 
